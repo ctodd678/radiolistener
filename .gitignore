@@ -1,0 +1,6 @@
+config.json
+chum_transcript.txt
+chunk.wav
+venv/
+__pycache__/
+*.wav

@@ -1,0 +1,11 @@
+{
+    "sender_email": "YOUR_EMAIL@gmail.com",
+    "app_password": "YOUR_APP_PASSWORD",
+    "recipients": [
+        "friend@example.com"
+    ],
+    "keywords": [
+        "cash",
+        "keyword"
+    ]
+}
