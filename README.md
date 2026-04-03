@@ -48,17 +48,17 @@ An AI-powered radio monitoring service built to run on an Intel N100 Proxmox nod
 
 ## ⚙️ Configuration
 
-Create a `config.json` file in the root directory. **Ensure this file is added to your .gitignore to protect your credentials.**
+Create a `config.json` file in the root directory (or rename provided `config.example.json`). **Ensure this file is added to your .gitignore to protect your credentials.**
 
 ```json
 {
-    "sender_email": "your-scout-bot@gmail.com",
+    "sender_email": "your-email-bot@gmail.com",
     "app_password": "xxxx xxxx xxxx xxxx",
     "recipients": [
-        "connor.example@gmail.com",
-        "friend.name@outlook.com"
+        "user.example@gmail.com",
+        "friend.example@outlook.com"
     ],
     "keywords": [
-        "cash", "keyword", "money", "win", "entry", "dollar", "thousand", "80", "jackpot"
+        "cash", "keyword", "money", "win", "entry"
     ]
 }
