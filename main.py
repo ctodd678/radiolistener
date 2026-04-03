@@ -36,7 +36,7 @@ else:
     BASE_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 SEGMENT_DIR = os.path.join(BASE_DIR, "segments")
-LOG_FILE = os.path.join(os.path.dirname(__file__), "chum_transcript.txt")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "radio_transcript.txt")
 
 # Create directories if they don't exist
 os.makedirs(SEGMENT_DIR, exist_ok=True)
