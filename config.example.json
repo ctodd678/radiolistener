@@ -4,8 +4,12 @@
     "recipients": [
         "friend@example.com"
     ],
-    "keywords": [
+    "strict_keywords": [
+        "keyword",
+        "cash plus"
+    ],
+    "prize_keywords": [
         "cash",
-        "keyword"
+        "money"
     ]
 }

@@ -4,13 +4,14 @@ import time
 import glob
 import signal
 import wave
+import re
 from datetime import datetime
 import smtplib
 import json
 from email.message import EmailMessage
 from faster_whisper import WhisperModel
 
-# --- 1. CONFIGURATION ---
+# 1. CONFIGURATION
 def load_config():
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     with open(config_path, 'r') as f:
@@ -21,16 +22,18 @@ SENDER_EMAIL = config['sender_email']
 APP_PASSWORD = config['app_password']
 RECIPIENTS = config['recipients']
 
-# Contest Timing & Logic
-STRICT_KEYWORDS = ["keyword", "104536", "80 thousand", "eighty thousand", "cash plus"]
-PRIZE_KEYWORDS = ["cash", "money", "win", "dollar", "thousand", "jackpot"]
+# Dynamically load the keyword tiers from config.json
+STRICT_KEYWORDS = config.get('strict_keywords', [])
+PRIZE_KEYWORDS = config.get('prize_keywords', [])
+
 STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
 MODEL_SIZE = "base"
 
-# --- 2. DYNAMIC PATHING (Windows vs. N100 RAM Disk) ---
+# 2. DYNAMIC PATHING (Windows vs. N100 RAM Disk)
 RAMDISK_PATH = "/mnt/ramdisk"
 if os.path.exists(RAMDISK_PATH):
-    BASE_DIR = os.path.join(RAMDISK_PATH, "radioscout")
+    # Updated to radiolistener
+    BASE_DIR = os.path.join(RAMDISK_PATH, "radiolistener")
 else:
     # Windows/Local Fallback
     BASE_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -45,12 +48,12 @@ os.makedirs(SEGMENT_DIR, exist_ok=True)
 LAST_ALERT_TIME = 0
 COOLDOWN_SECONDS = 600 
 
-# --- 3. HELPER FUNCTIONS ---
+# 3. HELPER FUNCTIONS
 
 def is_contest_active():
     """
-    Weekdays: 6:00 AM - 8:00 PM
-    Weekends: 1:00 PM - 6:00 PM
+    Weekdays: 6:00 AM to 8:00 PM
+    Weekends: 1:00 PM to 6:00 PM
     """
     now = datetime.now()
     day = now.weekday() # 0=Mon, 6=Sun
@@ -63,8 +66,6 @@ def is_contest_active():
 def send_email_blast(found_text):
     global LAST_ALERT_TIME
     current_time = time.time()
-    if not is_contest_active():
-        return
     if current_time - LAST_ALERT_TIME > COOLDOWN_SECONDS:
         hour_label = time.strftime("%I:00%p").lstrip('0')
         print(f"\n[!] ALERT TRIGGERED: Sending {hour_label} emails...")
@@ -82,7 +83,32 @@ def send_email_blast(found_text):
         except Exception as e:
             print(f"❌ Email Error: {e}")
 
-# --- 4. THE ENGINE ---
+def keyword_spotted(text_chunk):
+    """
+    Refined matching: 
+    1. Single words must be standalone.
+    2. Multi-word phrases are checked as exact substrings.
+    """
+    text_lower = text_chunk.lower()
+    
+    # Remove punctuation for better word matching
+    clean_text = re.sub(r'[^\w\s]', '', text_lower)
+    words_in_text = set(clean_text.split())
+
+    # Check STRICT_KEYWORDS (Phrases trigger regardless of time)
+    for phrase in STRICT_KEYWORDS:
+        if phrase.lower() in text_lower:
+            return True
+
+    # Check PRIZE_KEYWORDS (Single words only trigger during contest hours)
+    if is_contest_active():
+        for word in PRIZE_KEYWORDS:
+            if word.lower() in words_in_text:
+                return True
+
+    return False
+
+# 4. THE ENGINE
 
 def is_valid_wav(filepath, min_bytes=4096):
     """Returns True only if the file is a readable, non-empty WAV."""
@@ -123,12 +149,12 @@ def listen_and_spot():
 
     try:
         while True:
-            # 1. Health Check: If FFmpeg died, restart it
+            # Health Check: If FFmpeg died, restart it
             if ffmpeg_proc.poll() is not None:
                 print("⚠️ FFmpeg connection lost. Restarting...")
                 ffmpeg_proc = start_ffmpeg()
 
-            # 2. Monitor Segments
+            # Monitor Segments
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
             
             # Only process files that FFmpeg has finished writing (at least 2 in list)
@@ -149,11 +175,8 @@ def listen_and_spot():
                         with open(LOG_FILE, "a", encoding="utf-8") as f:
                             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {full_text}\n")
                         
-                        text_lower = full_text.lower()
-                        is_strict = any(k in text_lower for k in STRICT_KEYWORDS)
-                        is_prize = any(k in text_lower for k in PRIZE_KEYWORDS)
-                        
-                        if is_strict or (is_prize and is_contest_active()):
+                        # Trigger logic
+                        if keyword_spotted(full_text):
                             send_email_blast(full_text)
                 
                 except Exception as e:
@@ -169,7 +192,7 @@ def listen_and_spot():
             time.sleep(2) # Polling interval
 
     except KeyboardInterrupt:
-        print("\nScout shutting down...")
+        print("\nRadio Listener shutting down...")
     finally:
         if os.name == 'nt':
             # Kills windows process
