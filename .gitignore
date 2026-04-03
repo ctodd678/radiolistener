@@ -1,5 +1,5 @@
 config.json
-chum_transcript.txt
+radio_transcript.txt
 chunk.wav
 venv/
 __pycache__/
