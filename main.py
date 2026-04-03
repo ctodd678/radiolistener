@@ -18,9 +18,9 @@ SENDER_EMAIL = config['sender_email']
 APP_PASSWORD = config['app_password']
 RECIPIENTS = config['recipients']
 
-# Refined Keywords: Splitting into "High Priority" and "Supporting"
-PRIMARY_TRIGGER = "keyword"
-PRIZE_KEYWORDS = ["cash", "money", "win", "entry", "dollar", "thousand", "80", "jackpot"]
+# Refined Logic Tiers
+STRICT_KEYWORDS = ["keyword", "104536", "80 thousand", "eighty thousand"]
+PRIZE_KEYWORDS = ["cash", "money", "win", "dollar", "thousand", "jackpot"]
 
 STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
 MODEL_SIZE = "base"
@@ -39,15 +39,13 @@ def send_email_blast(found_text):
     global LAST_ALERT_TIME
     current_time = time.time()
     
-    # Check 1: Is it contest hours?
+    # Silence alerts outside contest hours
     if not is_contest_active():
-        print(f"[{time.strftime('%H:%M:%S')}] 🤐 Trigger ignored (Outside contest hours).")
         return
 
-    # Check 2: Cooldown
     if current_time - LAST_ALERT_TIME > COOLDOWN_SECONDS:
         hour_label = time.strftime("%I:00%p").lstrip('0')
-        print(f"📧 Blasting {hour_label} Alert...")
+        print(f"\n[!] ALERT TRIGGERED: Sending {hour_label} emails...")
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(SENDER_EMAIL, APP_PASSWORD)
@@ -78,7 +76,6 @@ def listen_and_spot():
         ]
 
         result = subprocess.run(command, capture_output=True, text=True)
-
         if result.returncode != 0 or not os.path.exists(CHUNK_PATH):
             time.sleep(5)
             continue
@@ -86,22 +83,26 @@ def listen_and_spot():
         segments, _ = model.transcribe(CHUNK_PATH, beam_size=1)
         for segment in segments:
             text = segment.text.strip()
-            if text:
-                timestamp = time.strftime('%H:%M:%S')
-                print(f"[{timestamp}] {text}")
-                
-                # Log to file (always)
-                with open(LOG_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
-                
-                # REFINED TRIGGER LOGIC
-                text_lower = text.lower()
-                
-                # 1. If the word 'keyword' is heard, almost always an alert
-                # 2. Or if '80' and 'thousand' appear together
-                # 3. Solo words like 'win' must now be inside contest hours to alert
-                if PRIMARY_TRIGGER in text_lower or any(k in text_lower for k in PRIZE_KEYWORDS):
-                    send_email_blast(text)
+            if not text: continue
+            
+            timestamp = time.strftime('%H:%M:%S')
+            print(f"[{timestamp}] {text}")
+            
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+            
+            text_lower = text.lower()
+            
+            # TRIGGER LOGIC:
+            # 1. Any STRICT keyword (keyword, 104536, etc.) triggers immediately.
+            # 2. PRIZE keywords (win, cash) only trigger if 'keyword' is ALSO present 
+            #    OR if it's during the active contest window to be safe.
+            
+            is_strict = any(k in text_lower for k in STRICT_KEYWORDS)
+            is_prize = any(k in text_lower for k in PRIZE_KEYWORDS)
+            
+            if is_strict or (is_prize and is_contest_active()):
+                send_email_blast(text)
 
 if __name__ == "__main__":
     listen_and_spot()
