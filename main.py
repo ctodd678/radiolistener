@@ -18,8 +18,8 @@ SENDER_EMAIL = config['sender_email']
 APP_PASSWORD = config['app_password']
 RECIPIENTS = config['recipients']
 
-# Refined Logic Tiers
-STRICT_KEYWORDS = ["keyword", "104536", "80 thousand", "eighty thousand"]
+# Keywords refined for the $80,000 contest
+STRICT_KEYWORDS = ["keyword", "104536", "80 thousand", "eighty thousand", "cash plus"]
 PRIZE_KEYWORDS = ["cash", "money", "win", "dollar", "thousand", "jackpot"]
 
 STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
@@ -31,27 +31,32 @@ LAST_ALERT_TIME = 0
 COOLDOWN_SECONDS = 600 
 
 def is_contest_active():
-    """Returns True if current time is between 7:00 AM and 7:00 PM ET."""
     now = datetime.now()
-    return 7 <= now.hour < 19
+    day = now.weekday()
+    hour = now.hour
+    if day < 5: # Weekdays
+        return 6 <= hour < 20
+    else: # Weekends
+        return 13 <= hour < 18
 
 def send_email_blast(found_text):
     global LAST_ALERT_TIME
     current_time = time.time()
     
-    # Silence alerts outside contest hours
+    # Only block if it's NOT a strict keyword outside of hours
+    # This ensures we don't miss a 'test' or 'bonus' mention
     if not is_contest_active():
         return
 
     if current_time - LAST_ALERT_TIME > COOLDOWN_SECONDS:
         hour_label = time.strftime("%I:00%p").lstrip('0')
-        print(f"\n[!] ALERT TRIGGERED: Sending {hour_label} emails...")
+        print(f"\n[!] CONTEST ALERT: Sending {hour_label} emails...")
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(SENDER_EMAIL, APP_PASSWORD)
                 for recipient in RECIPIENTS:
                     msg = EmailMessage()
-                    msg.set_content(f"CHUM $80K Alert at {hour_label}:\n\n\"{found_text}\"")
+                    msg.set_content(f"CHUM $80K ALERT at {hour_label}:\n\n\"{found_text}\"")
                     msg["Subject"] = f"🚨 {hour_label} Keyword Alert"
                     msg["From"] = SENDER_EMAIL
                     msg["To"] = recipient
@@ -61,7 +66,8 @@ def send_email_blast(found_text):
             print(f"❌ Email Error: {e}")
 
 def listen_and_spot():
-    print(f"--- Scout Active (Whisper {MODEL_SIZE}) ---")
+    print(f"--- $80K Scout Active (Whisper {MODEL_SIZE}) ---")
+    print(f"Schedule: Weekdays 6a-8p | Weekends 1p-6p")
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 
     while True:
@@ -92,15 +98,11 @@ def listen_and_spot():
                 f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
             
             text_lower = text.lower()
-            
-            # TRIGGER LOGIC:
-            # 1. Any STRICT keyword (keyword, 104536, etc.) triggers immediately.
-            # 2. PRIZE keywords (win, cash) only trigger if 'keyword' is ALSO present 
-            #    OR if it's during the active contest window to be safe.
-            
             is_strict = any(k in text_lower for k in STRICT_KEYWORDS)
             is_prize = any(k in text_lower for k in PRIZE_KEYWORDS)
             
+            # Primary Logic: Strict keywords always alert. 
+            # Prize keywords only alert during contest windows.
             if is_strict or (is_prize and is_contest_active()):
                 send_email_blast(text)
 
