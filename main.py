@@ -17,9 +17,9 @@ APP_PASSWORD = config['app_password']
 RECIPIENTS = config['recipients']
 KEYWORDS = config['keywords']
 
-STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
+STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox" # put your radio url here
 MODEL_SIZE = "base"
-LOG_FILE = "chum_transcript.txt"
+LOG_FILE = "radio_transcript.txt"
 LAST_ALERT_TIME = 0
 COOLDOWN_SECONDS = 600 
 
@@ -66,7 +66,7 @@ def send_email_blast(found_text):
             print(f"❌ Email Blast Error: {e}")
 
 def listen_and_spot():
-    print(f"--- $80K Scout Active (Whisper {MODEL_SIZE}) ---")
+    print(f"--- Radio Listener Active (Whisper {MODEL_SIZE}) ---")
     print(f"Monitoring CHUM 104.5 for Keywords (7AM-7PM)...")
 
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
