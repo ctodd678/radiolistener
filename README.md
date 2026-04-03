@@ -2,6 +2,14 @@
 
 An AI-powered radio monitoring service built to run on an Intel N100 Proxmox node. It listens to the desired station live stream 24/7, transcribes audio in real-time using Whisper AI, and sends email alerts to a distribution list when keywords are detected.
 
+## 🎬 Demo
+
+> *Demo video of Radio Listener deployed on a Proxmox server in an LXC container running on an N100 mini pc. Provides 24/7 keyword detection at less than 10 watts.*
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/6f404bd5-0360-47cf-b9a4-53986dbdd29c" width="700" alt="fridgewise_demo_flutter">
+</p>
+
 ## 🚀 Features
 
 * **AI Transcription**: Uses `faster-whisper` (Base model) optimized for CPU execution with INT8 quantization.
