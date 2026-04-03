@@ -7,7 +7,7 @@ An AI-powered radio monitoring service built to run on an Intel N100 Proxmox nod
 > *Receipt to grocery data JSON. Back-end AI model running locally being called by flutter application via Android Emulator.*
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/6f404bd5-0360-47cf-b9a4-53986dbdd29c" width="350" alt="fridgewise_demo_flutter">
+  <img src="https://github.com/user-attachments/assets/6f404bd5-0360-47cf-b9a4-53986dbdd29c" width="700" alt="fridgewise_demo_flutter">
 </p>
 
 ## 🚀 Features
