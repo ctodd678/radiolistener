@@ -4,3 +4,4 @@ chunk.wav
 venv/
 __pycache__/
 *.wav
+test_email.py
