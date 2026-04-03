@@ -3,6 +3,7 @@ import os
 import time
 import glob
 import signal
+import wave
 from datetime import datetime
 import smtplib
 import json
@@ -83,6 +84,16 @@ def send_email_blast(found_text):
 
 # --- 4. THE ENGINE ---
 
+def is_valid_wav(filepath, min_bytes=4096):
+    """Returns True only if the file is a readable, non-empty WAV."""
+    if os.path.getsize(filepath) < min_bytes:
+        return False
+    try:
+        with wave.open(filepath, 'rb') as wf:
+            return wf.getnframes() > 0
+    except Exception:
+        return False
+
 def start_ffmpeg():
     """Starts a persistent background FFmpeg process to segment the stream."""
     print(f"[{time.strftime('%H:%M:%S')}] Connecting to persistent stream...")
@@ -104,7 +115,7 @@ def start_ffmpeg():
     return subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
 
 def listen_and_spot():
-    print(f"--- $80K Scout Active (Whisper {MODEL_SIZE}) ---")
+    print(f"--- Radio Listener Active (Whisper {MODEL_SIZE}) ---")
     print(f"Storage: {SEGMENT_DIR}")
     
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
@@ -120,11 +131,14 @@ def listen_and_spot():
             # 2. Monitor Segments
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
             
-            # We only process files that FFmpeg has finished writing (at least 2 in list)
+            # Only process files that FFmpeg has finished writing (at least 2 in list)
             if len(files) > 1:
                 target_file = files[0]
                 
                 try:
+                    if not is_valid_wav(target_file):
+                        continue
+
                     segments, _ = model.transcribe(target_file, beam_size=1)
                     full_text = " ".join([s.text.strip() for s in segments]).strip()
 
@@ -146,7 +160,7 @@ def listen_and_spot():
                     print(f"❌ Transcription error: {e}")
                 
                 finally:
-                    # Always delete the file once we're done or if it failed
+                    # Delete the file once done or if it failed
                     try:
                         os.remove(target_file)
                     except Exception as e:
@@ -158,7 +172,7 @@ def listen_and_spot():
         print("\nScout shutting down...")
     finally:
         if os.name == 'nt':
-            # Windows clean exit
+            # Kills windows process
             subprocess.run(['taskkill', '/F', '/T', '/PID', str(ffmpeg_proc.pid)], capture_output=True)
         else:
             ffmpeg_proc.terminate()
