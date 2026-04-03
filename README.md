@@ -4,7 +4,7 @@ An AI-powered radio monitoring service built to run on an Intel N100 Proxmox nod
 
 ## 🎬 Demo
 
-> *Receipt to grocery data JSON. Back-end AI model running locally being called by flutter application via Android Emulator.*
+> *Demo video of Radio Listener deployed on a Proxmox server in an LXC container running on an N100 mini pc. Provides 24/7 keyword detection at less than 10 watts.*
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/6f404bd5-0360-47cf-b9a4-53986dbdd29c" width="700" alt="fridgewise_demo_flutter">
