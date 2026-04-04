@@ -22,41 +22,31 @@ SENDER_EMAIL = config['sender_email']
 APP_PASSWORD = config['app_password']
 RECIPIENTS = config['recipients']
 
-# Dynamically load the keyword tiers from config.json
 STRICT_KEYWORDS = config.get('strict_keywords', [])
 PRIZE_KEYWORDS = config.get('prize_keywords', [])
 
 STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
 MODEL_SIZE = "base"
 
-# 2. DYNAMIC PATHING (Windows vs. N100 RAM Disk)
+# 2. DYNAMIC PATHING
 RAMDISK_PATH = "/mnt/ramdisk"
 if os.path.exists(RAMDISK_PATH):
-    # Updated to radiolistener
     BASE_DIR = os.path.join(RAMDISK_PATH, "radiolistener")
 else:
-    # Windows/Local Fallback
     BASE_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 SEGMENT_DIR = os.path.join(BASE_DIR, "segments")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "radio_transcript.txt")
 
-# Create directories if they don't exist
 os.makedirs(SEGMENT_DIR, exist_ok=True)
 
-# Globals for alert tracking
 LAST_ALERT_TIME = 0
 COOLDOWN_SECONDS = 600 
 
 # 3. HELPER FUNCTIONS
-
 def is_contest_active():
-    """
-    Weekdays: 6:00 AM to 8:00 PM
-    Weekends: 1:00 PM to 6:00 PM
-    """
     now = datetime.now()
-    day = now.weekday() # 0=Mon, 6=Sun
+    day = now.weekday()
     hour = now.hour
     if day < 5: 
         return 6 <= hour < 20
@@ -84,23 +74,14 @@ def send_email_blast(found_text):
             print(f"❌ Email Error: {e}")
 
 def keyword_spotted(text_chunk):
-    """
-    Refined matching: 
-    1. Single words must be standalone.
-    2. Multi-word phrases are checked as exact substrings.
-    """
     text_lower = text_chunk.lower()
-    
-    # Remove punctuation for better word matching
     clean_text = re.sub(r'[^\w\s]', '', text_lower)
     words_in_text = set(clean_text.split())
 
-    # Check STRICT_KEYWORDS (Phrases trigger regardless of time)
     for phrase in STRICT_KEYWORDS:
         if phrase.lower() in text_lower:
             return True
 
-    # Check PRIZE_KEYWORDS (Single words only trigger during contest hours)
     if is_contest_active():
         for word in PRIZE_KEYWORDS:
             if word.lower() in words_in_text:
@@ -109,9 +90,7 @@ def keyword_spotted(text_chunk):
     return False
 
 # 4. THE ENGINE
-
 def is_valid_wav(filepath, min_bytes=4096):
-    """Returns True only if the file is a readable, non-empty WAV."""
     if os.path.getsize(filepath) < min_bytes:
         return False
     try:
@@ -121,9 +100,7 @@ def is_valid_wav(filepath, min_bytes=4096):
         return False
 
 def start_ffmpeg():
-    """Starts a persistent background FFmpeg process to segment the stream."""
-    print(f"[{time.strftime('%H:%M:%S')}] Connecting to persistent stream...")
-    # Clean out old segments first
+    print(f"[{time.strftime('%H:%M:%S')}] Connecting to stream...")
     for f in glob.glob(os.path.join(SEGMENT_DIR, "*.wav")):
         try: os.remove(f)
         except: pass
@@ -137,7 +114,6 @@ def start_ffmpeg():
         '-acodec', 'pcm_s16le', '-ar', '16000',
         os.path.join(SEGMENT_DIR, 'chunk%03d.wav')
     ]
-    # Uses shell=True on Windows to handle process groups better, False on Linux
     return subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
 
 def listen_and_spot():
@@ -146,19 +122,44 @@ def listen_and_spot():
     
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
     ffmpeg_proc = start_ffmpeg()
+    
+    # WATCHDOG TIMER
+    last_segment_time = time.time()
+    MAX_STALL_SECONDS = 60 # If no file is produced in 60s, assume a freeze
 
     try:
         while True:
-            # Health Check: If FFmpeg died, restart it
-            if ffmpeg_proc.poll() is not None:
-                print("⚠️ FFmpeg connection lost. Restarting...")
-                ffmpeg_proc = start_ffmpeg()
+            current_time = time.time()
+            
+            # Health Check A: Did the process crash?
+            process_died = ffmpeg_proc.poll() is not None
+            
+            # Health Check B: Did the stream silently freeze?
+            stream_stalled = (current_time - last_segment_time) > MAX_STALL_SECONDS
 
-            # Monitor Segments
+            if process_died or stream_stalled:
+                error_reason = "Process crashed" if process_died else "Stream stalled"
+                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ FFmpeg connection lost ({error_reason}). Restarting...")
+                
+                # Force kill the zombie if it's a stall
+                if not process_died:
+                    try:
+                        if os.name == 'nt':
+                            subprocess.run(['taskkill', '/F', '/T', '/PID', str(ffmpeg_proc.pid)], capture_output=True)
+                        else:
+                            ffmpeg_proc.kill()
+                    except Exception as e:
+                        print(f"Error killing stuck process: {e}")
+
+                # Restart and reset the watchdog
+                ffmpeg_proc = start_ffmpeg()
+                last_segment_time = time.time() 
+
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
             
-            # Only process files that FFmpeg has finished writing (at least 2 in list)
             if len(files) > 1:
+                # We got a file! The stream is healthy.
+                last_segment_time = time.time() 
                 target_file = files[0]
                 
                 try:
@@ -175,7 +176,6 @@ def listen_and_spot():
                         with open(LOG_FILE, "a", encoding="utf-8") as f:
                             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {full_text}\n")
                         
-                        # Trigger logic
                         if keyword_spotted(full_text):
                             send_email_blast(full_text)
                 
@@ -183,19 +183,17 @@ def listen_and_spot():
                     print(f"❌ Transcription error: {e}")
                 
                 finally:
-                    # Delete the file once done or if it failed
                     try:
                         os.remove(target_file)
                     except Exception as e:
                         print(f"⚠️ Could not delete {target_file}: {e}")
 
-            time.sleep(2) # Polling interval
+            time.sleep(2) 
 
     except KeyboardInterrupt:
         print("\nRadio Listener shutting down...")
     finally:
         if os.name == 'nt':
-            # Kills windows process
             subprocess.run(['taskkill', '/F', '/T', '/PID', str(ffmpeg_proc.pid)], capture_output=True)
         else:
             ffmpeg_proc.terminate()
