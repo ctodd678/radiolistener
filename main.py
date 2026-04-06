@@ -15,18 +15,22 @@ from faster_whisper import WhisperModel
 def load_config():
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     with open(config_path, 'r') as f:
-        return json.load(f)
+        data = json.load(f)
+    
+    # Startup Diagnostic
+    print(f"--- Configuration Loaded ---")
+    print(f"STRICT: {data.get('strict_keywords', [])}")
+    print(f"SHORTCODES: {data.get('shortcodes', [])}")
+    print(f"EXCLUSIONS: {data.get('exclude_keywords', [])}")
+    return data
 
 config = load_config()
 SENDER_EMAIL = config['sender_email']
 APP_PASSWORD = config['app_password']
 RECIPIENTS = config['recipients']
 
-STRICT_KEYWORDS = config.get('strict_keywords', [])
-PRIZE_KEYWORDS = config.get('prize_keywords', [])
-
 STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
-MODEL_SIZE = "base"
+MODEL_SIZE = "small" # Upgraded for better literacy/less hallucinations
 
 # 2. DYNAMIC PATHING
 RAMDISK_PATH = "/mnt/ramdisk"
@@ -40,11 +44,13 @@ LOG_FILE = os.path.join(os.path.dirname(__file__), "radio_transcript.txt")
 
 os.makedirs(SEGMENT_DIR, exist_ok=True)
 
-LAST_ALERT_TIME = 0
-COOLDOWN_SECONDS = 600 
-
 # 3. HELPER FUNCTIONS
+
 def is_contest_active():
+    """
+    Weekdays: 6:00 AM to 8:00 PM
+    Weekends: 1:00 PM to 6:00 PM
+    """
     now = datetime.now()
     day = now.weekday()
     hour = now.hour
@@ -54,44 +60,66 @@ def is_contest_active():
         return 13 <= hour < 18
 
 def send_email_blast(found_text):
-    global LAST_ALERT_TIME
-    current_time = time.time()
-    if current_time - LAST_ALERT_TIME > COOLDOWN_SECONDS:
-        hour_label = time.strftime("%I:00%p").lstrip('0')
-        print(f"\n[!] ALERT TRIGGERED: Sending {hour_label} emails...")
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(SENDER_EMAIL, APP_PASSWORD)
-                for recipient in RECIPIENTS:
-                    msg = EmailMessage()
-                    msg.set_content(f"CHUM $80K ALERT at {hour_label}:\n\n\"{found_text}\"")
-                    msg["Subject"] = f"🚨 {hour_label} Keyword Alert"
-                    msg["From"] = SENDER_EMAIL
-                    msg["To"] = recipient
-                    server.send_message(msg)
-            LAST_ALERT_TIME = current_time
-        except Exception as e:
-            print(f"❌ Email Error: {e}")
+    # Cooldown removed per request
+    timestamp = time.strftime("%I:%M%p").lstrip('0')
+    print(f"\n[!] KEYWORD DETECTED: Sending alert for: {found_text}")
+    
+    try:
+        # 15s timeout prevents hanging on bad network connections
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            server.login(SENDER_EMAIL, APP_PASSWORD)
+            for recipient in RECIPIENTS:
+                msg = EmailMessage()
+                msg.set_content(f"Radio Listener Alert at {timestamp}:\n\n\"{found_text}\"")
+                msg["Subject"] = f"🚨 Radio Alert: {timestamp}"
+                msg["From"] = SENDER_EMAIL
+                msg["To"] = recipient
+                server.send_message(msg)
+            print(f"✅ Emails sent successfully to {len(RECIPIENTS)} recipients.")
+    except Exception as e:
+        print(f"❌ Email Error: {e}")
 
 def keyword_spotted(text_chunk):
     text_lower = text_chunk.lower()
-    clean_text = re.sub(r'[^\w\s]', '', text_lower)
-    words_in_text = set(clean_text.split())
+    
+    # 1. EXCLUSIONS (Immediate Kill for PSAs/Teasers)
+    EXCLUDE_KEYWORDS = config.get('exclude_keywords', [])
+    for bad_word in EXCLUDE_KEYWORDS:
+        if bad_word.lower() in text_lower:
+            return False
 
+    # 2. ANCHOR PHRASES (High Confidence)
+    STRICT_KEYWORDS = config.get('strict_keywords', [])
     for phrase in STRICT_KEYWORDS:
         if phrase.lower() in text_lower:
             return True
 
-    if is_contest_active():
-        for word in PRIZE_KEYWORDS:
-            if word.lower() in words_in_text:
-                return True
+    # 3. SHORTCODE & CONTEXT LOGIC
+    SHORTCODES = config.get('shortcodes', [])
+    PRIZE_WORDS = config.get('prize_keywords', [])
+    
+    has_shortcode = any(code in text_lower for code in SHORTCODES)
+    has_prize_context = any(word in text_lower for word in PRIZE_WORDS)
+    has_keyword_mention = "keyword" in text_lower
+
+    # If they mention the text line (104536), they MUST also mention a contest word
+    if has_shortcode:
+        if has_prize_context or has_keyword_mention:
+            return True
+        return False
+
+    # 4. GENERAL PRIZE CHECK (Contest Hours Only)
+    # Requires both a prize word AND the word "keyword" to reduce commercial noise
+    if is_contest_active() and has_prize_context and has_keyword_mention:
+        return True
 
     return False
 
 # 4. THE ENGINE
-def is_valid_wav(filepath, min_bytes=4096):
-    if os.path.getsize(filepath) < min_bytes:
+
+def is_valid_wav(filepath, min_bytes=8192):
+    """Checks if file is large enough and readable."""
+    if not os.path.exists(filepath) or os.path.getsize(filepath) < min_bytes:
         return False
     try:
         with wave.open(filepath, 'rb') as wf:
@@ -101,6 +129,7 @@ def is_valid_wav(filepath, min_bytes=4096):
 
 def start_ffmpeg():
     print(f"[{time.strftime('%H:%M:%S')}] Connecting to stream...")
+    # Clean up any leftover segments
     for f in glob.glob(os.path.join(SEGMENT_DIR, "*.wav")):
         try: os.remove(f)
         except: pass
@@ -114,59 +143,60 @@ def start_ffmpeg():
         '-acodec', 'pcm_s16le', '-ar', '16000',
         os.path.join(SEGMENT_DIR, 'chunk%03d.wav')
     ]
+    # Handle Windows vs Linux process groups for clean termination
     return subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
 
 def listen_and_spot():
     print(f"--- Radio Listener Active (Whisper {MODEL_SIZE}) ---")
     print(f"Storage: {SEGMENT_DIR}")
     
+    # Model uses int8 quantization for speed on CPU
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
     ffmpeg_proc = start_ffmpeg()
     
-    # WATCHDOG TIMER
     last_segment_time = time.time()
-    MAX_STALL_SECONDS = 60 # If no file is produced in 60s, assume a freeze
+    MAX_STALL_SECONDS = 60 # 60s Watchdog
 
     try:
         while True:
             current_time = time.time()
-            
-            # Health Check A: Did the process crash?
             process_died = ffmpeg_proc.poll() is not None
-            
-            # Health Check B: Did the stream silently freeze?
             stream_stalled = (current_time - last_segment_time) > MAX_STALL_SECONDS
 
             if process_died or stream_stalled:
-                error_reason = "Process crashed" if process_died else "Stream stalled"
-                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ FFmpeg connection lost ({error_reason}). Restarting...")
+                reason = "Crash" if process_died else "Stall"
+                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ FFmpeg {reason}. Restarting...")
                 
-                # Force kill the zombie if it's a stall
                 if not process_died:
                     try:
                         if os.name == 'nt':
                             subprocess.run(['taskkill', '/F', '/T', '/PID', str(ffmpeg_proc.pid)], capture_output=True)
                         else:
                             ffmpeg_proc.kill()
-                    except Exception as e:
-                        print(f"Error killing stuck process: {e}")
+                    except: pass
 
-                # Restart and reset the watchdog
                 ffmpeg_proc = start_ffmpeg()
                 last_segment_time = time.time() 
 
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
             
             if len(files) > 1:
-                # We got a file! The stream is healthy.
-                last_segment_time = time.time() 
+                last_segment_time = time.time() # Reset watchdog
                 target_file = files[0]
                 
                 try:
                     if not is_valid_wav(target_file):
                         continue
 
-                    segments, _ = model.transcribe(target_file, beam_size=1)
+                    # vad_filter: Removes silence/static to prevent hallucinations
+                    # condition_on_previous_text: Prevents infinite text loops
+                    segments, _ = model.transcribe(
+                        target_file, 
+                        beam_size=1, 
+                        vad_filter=True,
+                        condition_on_previous_text=False
+                    )
+                    
                     full_text = " ".join([s.text.strip() for s in segments]).strip()
 
                     if full_text:
@@ -185,8 +215,7 @@ def listen_and_spot():
                 finally:
                     try:
                         os.remove(target_file)
-                    except Exception as e:
-                        print(f"⚠️ Could not delete {target_file}: {e}")
+                    except: pass
 
             time.sleep(2) 
 
