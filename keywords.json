@@ -1,0 +1,47 @@
+{
+    "shortcodes": [
+        "104536",
+        "104-536",
+        "1-4-5-3-6",
+        "one oh four five three six",
+        "one of four five three six",
+        "one zero four five three six"
+    ],
+    "strict_keywords": [
+        "keyword is",
+        "the keyword is",
+        "text the keyword",
+        "keyword to cash is",
+        "text that word",
+        "one more time",
+        "this hour's keyword",
+        "this hour of keyword",
+        "keyword cash is",
+        "chance at $80,000",
+        "chance at 80,000"
+    ],
+    "prize_keywords": [
+        "cash",
+        "money",
+        "thousand",
+        "jackpot"
+    ],
+    "exclude_keywords": [
+        "988",
+        "suicide",
+        "crisis",
+        "crisis help",
+        "confidential support",
+        "plans",
+        "text me",
+        "let me know",
+        "what are you doing",
+        "coming up",
+        "later this hour",
+        "still to come",
+        "is still to come",
+        "next chance",
+        "doesn't stop",
+        "keep it on"
+    ]
+}

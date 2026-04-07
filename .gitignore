@@ -5,3 +5,4 @@ venv/
 __pycache__/
 *.wav
 test_email.py
+radio_listener.log
