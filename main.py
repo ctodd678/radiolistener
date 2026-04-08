@@ -218,7 +218,6 @@ def kill_ffmpeg(proc):
 def start_ffmpeg():
     log.info("Connecting to stream...")
 
-    # clear out any leftover chunks from last run
     for f in glob.glob(os.path.join(SEGMENT_DIR, "*.wav")):
         try:
             os.remove(f)
@@ -227,9 +226,7 @@ def start_ffmpeg():
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-reconnect", "1",           # auto reconnect on drop
-        "-reconnect_streamed", "1",  # reconnect mid-stream too
-        "-reconnect_delay_max", "10",
+        "-live_start_index", "-3",
         "-user_agent", "Mozilla/5.0",
         "-i", STREAM_URL,
         "-f", "segment",
@@ -240,14 +237,25 @@ def start_ffmpeg():
         os.path.join(SEGMENT_DIR, "chunk%03d.wav"),
     ]
 
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         cmd,
         stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
     )
+    
+    # logging for ffmpeg
+    # time.sleep(3)
+    # if proc.poll() is not None:
+    #     out, err = proc.communicate()
+    #     log.error(f"FFmpeg exited immediately with code {proc.returncode}")
+    #     log.error(f"stderr: {err.decode(errors='replace')}")
+    #     log.error(f"stdout: {out.decode(errors='replace')}")
+    
+    return proc
 
 # --- MAIN LOOP ---
-MAX_STALL_SECONDS      = 180 #stall time 3x the chunk length
+MAX_STALL_SECONDS      = 90 #stall time 1.5x the chunk length
 MAX_QUEUED_CHUNKS      = 5
 KEYWORD_RELOAD_INTERVAL = 60  # how often to re-read keywords.json in seconds
 
@@ -309,6 +317,11 @@ def listen_and_spot():
                     target_file,
                     beam_size=1,
                     vad_filter=True,
+                    vad_parameters=dict(
+                        threshold=0.3,          # lower threshold for increased sensitivty
+                        min_speech_duration_ms=500,
+                        min_silence_duration_ms=300,
+                    ),
                     condition_on_previous_text=False,
                     temperature=0.0,
                 )
