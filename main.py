@@ -224,7 +224,7 @@ def start_ffmpeg():
             pass
 
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",  
         "-live_start_index", "-3",
         "-user_agent", "Mozilla/5.0",
         "-i", STREAM_URL,
@@ -239,7 +239,7 @@ def start_ffmpeg():
     return subprocess.Popen(
         cmd,
         stderr=subprocess.PIPE,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
     )
 
@@ -277,11 +277,20 @@ def listen_and_spot():
 
             if process_died or stream_stalled:
                 reason = "crash" if process_died else "stall"
+                
+                if process_died and ffmpeg_proc.stderr:
+                    try:
+                        err_output = ffmpeg_proc.stderr.read(4096).decode(errors="replace").strip()
+                        if err_output:
+                            log.warning(f"FFmpeg last output: {err_output}")
+                    except Exception:
+                        pass
+
                 log.warning(f"FFmpeg {reason} detected — restarting...")
                 kill_ffmpeg(ffmpeg_proc)
-                ffmpeg_proc       = start_ffmpeg()
+                ffmpeg_proc = start_ffmpeg()
                 last_segment_time = time.time()
-                time.sleep(10)  # give the N100 breathing room between restarts
+                time.sleep(10)
                 continue
 
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
