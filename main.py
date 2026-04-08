@@ -53,7 +53,6 @@ APP_PASSWORD = config["app_password"]
 RECIPIENTS   = config["recipients"]
 
 STREAM_URL = "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8"
-# STREAM_URL_BACKUP = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
 MODEL_SIZE = "small"
 
 # --- PATHS ---
@@ -237,27 +236,18 @@ def start_ffmpeg():
         os.path.join(SEGMENT_DIR, "chunk%03d.wav"),
     ]
 
-    proc = subprocess.Popen(
+    return subprocess.Popen(
         cmd,
         stderr=subprocess.PIPE,
         stdout=subprocess.PIPE,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
     )
-    
-    # logging for ffmpeg
-    # time.sleep(3)
-    # if proc.poll() is not None:
-    #     out, err = proc.communicate()
-    #     log.error(f"FFmpeg exited immediately with code {proc.returncode}")
-    #     log.error(f"stderr: {err.decode(errors='replace')}")
-    #     log.error(f"stdout: {out.decode(errors='replace')}")
-    
-    return proc
 
 # --- MAIN LOOP ---
-MAX_STALL_SECONDS      = 90 #stall time 1.5x the chunk length
-MAX_QUEUED_CHUNKS      = 5
-KEYWORD_RELOAD_INTERVAL = 60  # how often to re-read keywords.json in seconds
+MAX_STALL_SECONDS       = 90   # 1.5x chunk length
+MAX_QUEUED_CHUNKS       = 5
+KEYWORD_RELOAD_INTERVAL = 60   # how often to re-read keywords.json in seconds
+HEARTBEAT_INTERVAL      = 300  # log a heartbeat every 5 minutes
 
 def listen_and_spot():
     log.info(f"Radio Listener active (Whisper {MODEL_SIZE})")
@@ -266,6 +256,7 @@ def listen_and_spot():
     ffmpeg_proc         = start_ffmpeg()
     last_segment_time   = time.time()
     last_keyword_reload = time.time()
+    last_heartbeat      = time.time()
 
     try:
         while True:
@@ -273,6 +264,12 @@ def listen_and_spot():
             if time.time() - last_keyword_reload > KEYWORD_RELOAD_INTERVAL:
                 reload_keywords()
                 last_keyword_reload = time.time()
+
+            # heartbeat so we know the app is alive even during long music stretches
+            if time.time() - last_heartbeat > HEARTBEAT_INTERVAL:
+                files_queued = len(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
+                log.info(f"[HEARTBEAT] alive | segments queued: {files_queued}")
+                last_heartbeat = time.time()
 
             # restart ffmpeg if it crashed or the stream went silent
             process_died   = ffmpeg_proc.poll() is not None
@@ -284,7 +281,7 @@ def listen_and_spot():
                 kill_ffmpeg(ffmpeg_proc)
                 ffmpeg_proc       = start_ffmpeg()
                 last_segment_time = time.time()
-                time.sleep(3)
+                time.sleep(10)  # give the N100 breathing room between restarts
                 continue
 
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
@@ -318,7 +315,7 @@ def listen_and_spot():
                     beam_size=1,
                     vad_filter=True,
                     vad_parameters=dict(
-                        threshold=0.3,          # lower threshold for increased sensitivty
+                        threshold=0.3,
                         min_speech_duration_ms=500,
                         min_silence_duration_ms=300,
                     ),
