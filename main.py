@@ -52,7 +52,8 @@ SENDER_EMAIL = config["sender_email"]
 APP_PASSWORD = config["app_password"]
 RECIPIENTS   = config["recipients"]
 
-STREAM_URL = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
+STREAM_URL = "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8"
+# STREAM_URL_BACKUP = "https://15723.live.streamtheworld.com/CHUMFMAAC_SC?dist=onlineradiobox"
 MODEL_SIZE = "small"
 
 # --- PATHS ---
@@ -232,7 +233,7 @@ def start_ffmpeg():
         "-user_agent", "Mozilla/5.0",
         "-i", STREAM_URL,
         "-f", "segment",
-        "-segment_time", "15",
+        "-segment_time", "60",
         "-segment_format", "wav",
         "-acodec", "pcm_s16le",
         "-ar", "16000",
@@ -246,8 +247,8 @@ def start_ffmpeg():
     )
 
 # --- MAIN LOOP ---
-MAX_STALL_SECONDS      = 60
-MAX_QUEUED_CHUNKS      = 10
+MAX_STALL_SECONDS      = 180 #stall time 3x the chunk length
+MAX_QUEUED_CHUNKS      = 5
 KEYWORD_RELOAD_INTERVAL = 60  # how often to re-read keywords.json in seconds
 
 def listen_and_spot():
