@@ -1,15 +1,9 @@
 {
     "sender_email": "YOUR_EMAIL@gmail.com",
     "app_password": "YOUR_APP_PASSWORD",
+    "batch_mode": false,
+    "gemini_api_key": "YOUR_GEMINI_API_KEY",
     "recipients": [
         "friend@example.com"
-    ],
-    "strict_keywords": [
-        "keyword",
-        "cash plus"
-    ],
-    "prize_keywords": [
-        "cash",
-        "money"
     ]
 }

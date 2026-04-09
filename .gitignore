@@ -6,3 +6,4 @@ __pycache__/
 *.wav
 test_email.py
 radio_listener.log
+batch_detections.json
