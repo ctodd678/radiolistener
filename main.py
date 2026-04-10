@@ -17,7 +17,7 @@ import urllib.request
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("radio_listener.log", encoding="utf-8"),
@@ -33,6 +33,8 @@ def load_config():
         return json.load(f)
 
 def load_keywords():
+    # separate from config so I can push keyword changes to github
+    # and pull them on the server without touching credentials
     keywords_path = os.path.join(os.path.dirname(__file__), "keywords.json")
     with open(keywords_path, "r") as f:
         data = json.load(f)
@@ -50,20 +52,16 @@ keywords = load_keywords()
 SENDER_EMAIL = config["sender_email"]
 APP_PASSWORD = config["app_password"]
 RECIPIENTS   = config["recipients"]
-
-# batch mode config
-BATCH_MODE   = config.get("batch_mode", False)
 GEMINI_KEY   = config.get("gemini_api_key", "")
 
 STREAM_URL = "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8"
 MODEL_SIZE = "small"
 
-# heartbeat config: hours (24h) during which to send status pings, e.g. [12, 16]
+# heartbeat hours (24h) and crash alert threshold pulled from config
 HEARTBEAT_HOURS       = config.get("heartbeat_hours", [12, 16])
-# how many consecutive ffmpeg restarts trigger a crash alert email
 CRASH_ALERT_THRESHOLD = config.get("crash_alert_threshold", 3)
 
-# --- TUNING CONSTANTS ---
+# --- TUNING ---
 SEGMENT_TIME_SECONDS    = 30
 MAX_STALL_SECONDS       = 45
 STARTUP_GRACE_SECONDS   = 60
@@ -73,6 +71,7 @@ EMAIL_RETRIES           = 3
 OVERLAP_WORD_COUNT      = 30
 
 # --- PATHS ---
+# use ramdisk if available, otherwise just dump in /data
 RAMDISK_PATH = "/mnt/ramdisk"
 BASE_DIR = (
     os.path.join(RAMDISK_PATH, "radiolistener")
@@ -80,31 +79,33 @@ BASE_DIR = (
     else os.path.join(os.path.dirname(__file__), "data")
 )
 
-SEGMENT_DIR      = os.path.join(BASE_DIR, "segments")
-LOG_FILE         = os.path.join(os.path.dirname(__file__), "radio_transcript.txt")
-BATCH_FILE       = os.path.join(os.path.dirname(__file__), "batch_detections.json")
+SEGMENT_DIR = os.path.join(BASE_DIR, "segments")
+LOG_FILE    = os.path.join(os.path.dirname(__file__), "radio_transcript.txt")
+BATCH_FILE  = os.path.join(os.path.dirname(__file__), "batch_detections.json")
 
 os.makedirs(SEGMENT_DIR, exist_ok=True)
 log.info(f"Segment dir: {SEGMENT_DIR}")
-log.info(f"Batch mode: {'ON' if BATCH_MODE else 'OFF'}")
 
-
-# --- BATCH DETECTION STORAGE ---
+# --- BATCH STORAGE ---
 batch_lock       = threading.Lock()
-batch_sent_today = False   # tracks whether we already fired the end-of-day send
+batch_sent_today = False
 
 def load_batch():
-    """Load persisted detections from disk so restarts don't lose the day's data."""
+    # load persisted detections from previous runs, but only keep today's so we don't accidentally email old ones
     if os.path.exists(BATCH_FILE):
         try:
             with open(BATCH_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            today = time.strftime("%Y-%m-%d")
+            todays = [d for d in data if d["timestamp"].startswith(today)]
+            if len(todays) < len(data):
+                log.info(f"Filtered out {len(data) - len(todays)} detection(s) from previous days.")
+            return todays
         except Exception:
             pass
     return []
 
 def save_batch(detections):
-    """Persist current batch to disk."""
     try:
         with open(BATCH_FILE, "w", encoding="utf-8") as f:
             json.dump(detections, f, indent=2)
@@ -112,7 +113,6 @@ def save_batch(detections):
         log.warning(f"Failed to save batch file: {e}")
 
 def add_to_batch(text):
-    """Thread-safe append to the in-memory and on-disk batch."""
     global batch_detections
     entry = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -121,7 +121,7 @@ def add_to_batch(text):
     with batch_lock:
         batch_detections.append(entry)
         save_batch(batch_detections)
-    log.info(f"[BATCH] Detection queued ({len(batch_detections)} total today): {text[:80]}")
+    log.info(f"[BATCH] Detection queued ({len(batch_detections)} total today).")
 
 def clear_batch():
     global batch_detections
@@ -132,16 +132,12 @@ def clear_batch():
 batch_detections = load_batch()
 log.info(f"Loaded {len(batch_detections)} existing detections from previous session.")
 
-
 # --- GEMINI KEYWORD EXTRACTION ---
 def extract_keywords_with_gemini(detections):
-    """
-    Pass all raw detection texts to Gemini Flash and ask it to extract
-    just the contest keyword from each one. Returns a clean list of strings.
-    Falls back to the raw texts if the API call fails.
-    """
+    # ask gemini to pull just the contest word out of each raw detection
+    # falls back to raw texts if the api call fails
     if not GEMINI_KEY:
-        log.warning("No Gemini API key set in config.json — skipping AI extraction.")
+        log.warning("No Gemini API key in config.json — skipping AI extraction.")
         return [d["text"] for d in detections]
 
     raw_texts = "\n".join(
@@ -150,11 +146,19 @@ def extract_keywords_with_gemini(detections):
     )
 
     prompt = (
-        "You are helping process radio contest detections. "
-        "Below are transcribed radio segments that were flagged as containing a contest keyword. "
-        "For each numbered item extract ONLY the contest keyword or short phrase the DJ announced. "
-        "If you cannot identify a clear keyword, write 'unclear'. "
-        "Reply with a numbered list only, no extra commentary.\n\n"
+        "You are extracting contest keywords from radio transcripts.\n\n"
+        "Rules:\n"
+        "1. Each item is a radio segment where a DJ announced a keyword to cash contest word.\n"
+        "2. For each item output ONLY the single contest keyword the DJ announced.\n"
+        "3. The keyword is always a single common English word (e.g. schedule, sunshine, ocean).\n"
+        "4. The DJ usually says it explicitly: your keyword is X or keyword to cash is X or spells it out.\n"
+        "5. If you cannot find a clear keyword write unclear.\n"
+        "6. Output ONLY a numbered list. One word per line. No explanation. No punctuation after the word.\n\n"
+        "Example output:\n"
+        "1. schedule\n"
+        "2. sunshine\n"
+        "3. unclear\n\n"
+        "Transcripts:\n"
         f"{raw_texts}"
     )
 
@@ -164,7 +168,7 @@ def extract_keywords_with_gemini(detections):
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+        f"gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     )
 
     try:
@@ -183,17 +187,15 @@ def extract_keywords_with_gemini(detections):
         log.error(f"Gemini API error: {e} — falling back to raw detections.")
         return [d["text"] for d in detections]
 
-
-# --- BATCH EMAIL SEND ---
+# --- BATCH SUMMARY EMAIL ---
 def send_batch_email():
-    """Send a summary email of all batched detections and clear the batch."""
     global batch_sent_today
 
     with batch_lock:
         detections = list(batch_detections)
 
     if not detections:
-        log.info("[BATCH] No detections today, skipping end-of-day email.")
+        log.info("[BATCH] No detections today, skipping summary email.")
         batch_sent_today = True
         return
 
@@ -205,9 +207,7 @@ def send_batch_email():
         f"  {i+1}. [{d['timestamp']}] {d['text']}"
         for i, d in enumerate(detections)
     )
-    extracted_section = "\n".join(
-        f"  {line}" for line in extracted
-    )
+    extracted_section = "\n".join(f"  {line}" for line in extracted)
 
     body = (
         f"Radio Listener End-of-Day Summary\n"
@@ -241,26 +241,20 @@ def send_batch_email():
 
     log.error("[BATCH] All batch email attempts failed.")
 
-
 # --- BATCH SCHEDULER THREAD ---
 def batch_scheduler():
-    """
-    Background thread that watches the clock and fires the end-of-day
-    email once per day at the end of the contest window:
-      weekdays  -> 20:00 (8pm)
-      weekends  -> 18:00 (6pm)
-    Resets the sent flag at midnight so the next day works correctly.
-    """
+    # fires the end-of-day summary once the contest window closes
+    # weekdays at 8pm, weekends at 6pm
+    # resets at midnight so the next day works
     global batch_sent_today
     log.info("[BATCH SCHEDULER] Started.")
 
     while True:
         now     = datetime.now()
-        weekday = now.weekday()   # 0=Mon ... 6=Sun
+        weekday = now.weekday()
         hour    = now.hour
         minute  = now.minute
 
-        # reset the sent flag at midnight
         if hour == 0 and minute == 0:
             batch_sent_today = False
             log.info("[BATCH SCHEDULER] Daily reset.")
@@ -268,16 +262,15 @@ def batch_scheduler():
         if not batch_sent_today:
             end_hour = 20 if weekday < 5 else 18
             if hour == end_hour and minute == 0:
-                log.info(f"[BATCH SCHEDULER] End-of-contest window reached ({end_hour}:00) — sending summary.")
+                log.info(f"[BATCH SCHEDULER] Contest window closed ({end_hour}:00) — sending summary.")
                 send_batch_email()
 
-        time.sleep(30)   # check every 30 seconds
-
+        time.sleep(30)
 
 # --- CRASH ALERT ---
 def send_crash_alert(reason, restart_count):
-    """Fire an immediate email when the app has restarted too many times."""
-    log.warning(f"[CRASH ALERT] Sending alert after {restart_count} restarts: {reason}")
+    # fires when ffmpeg has restarted too many times in a row
+    log.warning(f"[CRASH ALERT] Sending alert after {restart_count} restarts.")
     subject = f"Radio Listener CRASH ALERT: {time.strftime('%I:%M%p').lstrip('0')}"
     body = (
         f"Radio Listener has restarted {restart_count} times in a row.\n\n"
@@ -304,10 +297,9 @@ def send_crash_alert(reason, restart_count):
             if attempt < EMAIL_RETRIES:
                 time.sleep(2)
 
-
 # --- HEARTBEAT ---
 def send_heartbeat():
-    """Send a brief status email confirming the app is alive."""
+    # quick status ping so I know the app is alive
     with batch_lock:
         detection_count = len(batch_detections)
 
@@ -316,7 +308,6 @@ def send_heartbeat():
         f"Radio Listener is running normally.\n\n"
         f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Detections so far today: {detection_count}\n"
-        f"Batch mode: {'ON' if BATCH_MODE else 'OFF'}\n"
     )
     for attempt in range(1, EMAIL_RETRIES + 1):
         try:
@@ -336,13 +327,9 @@ def send_heartbeat():
             if attempt < EMAIL_RETRIES:
                 time.sleep(2)
 
-
 # --- HEARTBEAT SCHEDULER THREAD ---
 def heartbeat_scheduler():
-    """
-    Background thread that sends a status ping at each hour listed in
-    HEARTBEAT_HOURS, once per hour per day. Resets sent set at midnight.
-    """
+    # sends a status ping at each hour in HEARTBEAT_HOURS, once per day each
     sent_hours = set()
     log.info(f"[HEARTBEAT SCHEDULER] Started. Will ping at hours: {HEARTBEAT_HOURS}")
 
@@ -359,9 +346,10 @@ def heartbeat_scheduler():
 
         time.sleep(30)
 
-
 # --- HELPERS ---
 def reload_keywords():
+    # re-reads keywords.json from disk, called every 60s in the main loop
+    # so a git pull on the server picks up changes without a restart
     global keywords
     try:
         keywords_path = os.path.join(os.path.dirname(__file__), "keywords.json")
@@ -371,13 +359,13 @@ def reload_keywords():
         log.warning(f"Failed to reload keywords.json: {e} — keeping previous values.")
 
 def is_contest_active():
+    # weekdays 6am-8pm, weekends 1pm-6pm
     now  = datetime.now()
     day  = now.weekday()
     hour = now.hour
     return (6 <= hour < 20) if day < 5 else (13 <= hour < 18)
 
-
-# --- EMAIL WITH RETRY (immediate mode) ---
+# --- EMAIL ---
 def send_email_blast(found_text):
     timestamp = time.strftime("%I:%M%p").lstrip("0")
     log.info(f"[!] KEYWORD DETECTED — sending alert: {found_text}")
@@ -402,14 +390,17 @@ def send_email_blast(found_text):
 
     log.error("All email attempts failed.")
 
-
 # --- HALLUCINATION FILTER ---
 def is_hallucination(text):
+    # whisper likes to make stuff up when there's no real speech
+    # catch the obvious cases before wasting time on keyword checks
     words = text.lower().split()
 
+    # too short to be real
     if len(words) < 3:
         return True
 
+    # repeated trigrams = whisper looping on itself, e.g. "i can't win i can't win"
     if len(words) >= 9:
         trigrams = [" ".join(words[i:i+3]) for i in range(len(words) - 2)]
         for trigram in trigrams:
@@ -419,24 +410,29 @@ def is_hallucination(text):
 
     return False
 
-
 # --- KEYWORD DETECTION ---
 def keyword_spotted(text_chunk):
     text_lower = text_chunk.lower()
 
+    # exclusions first — if any bad word is in the chunk just kill it
     for bad_word in keywords.get("exclude_keywords", []):
         if bad_word.lower() in text_lower:
             log.info(f"[EXCLUDED] Matched '{bad_word}' — skipping.")
             return False
 
+    # strict phrases checked before hallucination filter
+    # a short chunk like "keyword is sunshine" must not get dropped as too short
     for phrase in keywords.get("strict_keywords", []):
         if phrase.lower() in text_lower:
             log.info(f"[STRICT MATCH] '{phrase}'")
             return True
 
+    # hallucination check for softer contextual matches
     if is_hallucination(text_chunk):
         return False
 
+    # looks for 4+ single letters separated by hyphens or spaces
+    # catches "w-i-l-d", "G L O W", "s e a s o n" etc.
     spelling_regex   = r"\b([a-z](?:[- ][a-z]){3,})\b"
     has_spelled_word = bool(re.search(spelling_regex, text_lower))
 
@@ -447,25 +443,28 @@ def keyword_spotted(text_chunk):
     has_prize_context   = any(word in text_lower for word in PRIZE_WORDS)
     has_keyword_mention = "keyword" in text_lower
 
+    # dj spelling something out + any contest context = probably the keyword
     if has_spelled_word and (has_shortcode or has_keyword_mention or has_prize_context):
         log.info(f"[SPELLING MATCH] Spelled word with contest context.")
         return True
 
+    # shortcode by itself isn't enough, need at least one other signal
     if has_shortcode:
         if has_prize_context or has_keyword_mention:
             log.info(f"[SHORTCODE MATCH] Shortcode with contest context.")
             return True
         return False
 
+    # fallback during contest hours only
     if is_contest_active() and has_prize_context and has_keyword_mention:
         log.info(f"[PRIZE MATCH] Prize context during contest hours.")
         return True
 
     return False
 
-
 # --- WAV VALIDATION ---
 def is_valid_wav(filepath, min_bytes=8192, timeout=2.0):
+    # runs in a thread so it doesn't block if ffmpeg is still writing the file
     if not os.path.exists(filepath):
         return False
     if os.path.getsize(filepath) < min_bytes:
@@ -485,7 +484,6 @@ def is_valid_wav(filepath, min_bytes=8192, timeout=2.0):
     t.join(timeout)
     return result[0]
 
-
 # --- FFMPEG ---
 def kill_ffmpeg(proc):
     if proc is None:
@@ -503,6 +501,7 @@ def kill_ffmpeg(proc):
         pass
 
 def drain_stderr(proc, label="ffmpeg"):
+    # drain stderr in background so the pipe buffer never fills and blocks ffmpeg
     def _drain():
         try:
             for line in proc.stderr:
@@ -519,6 +518,7 @@ def drain_stderr(proc, label="ffmpeg"):
 def start_ffmpeg():
     log.info("Connecting to stream...")
 
+    # clear out any leftover chunks from last run
     for f in glob.glob(os.path.join(SEGMENT_DIR, "*.wav")):
         try:
             os.remove(f)
@@ -553,24 +553,14 @@ def start_ffmpeg():
     drain_stderr(proc, label="ffmpeg")
     return proc
 
-
 # --- MAIN LOOP ---
 def listen_and_spot():
     log.info(f"Radio Listener active (Whisper {MODEL_SIZE})")
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 
-    # start batch scheduler thread if batch mode is enabled
-    if BATCH_MODE:
-        scheduler_thread = threading.Thread(
-            target=batch_scheduler, daemon=True, name="batch-scheduler"
-        )
-        scheduler_thread.start()
-
-    # always start heartbeat scheduler
-    heartbeat_thread = threading.Thread(
-        target=heartbeat_scheduler, daemon=True, name="heartbeat-scheduler"
-    )
-    heartbeat_thread.start()
+    # start background threads
+    threading.Thread(target=batch_scheduler, daemon=True, name="batch-scheduler").start()
+    threading.Thread(target=heartbeat_scheduler, daemon=True, name="heartbeat-scheduler").start()
 
     ffmpeg_proc          = start_ffmpeg()
     last_segment_time    = time.time()
@@ -581,12 +571,15 @@ def listen_and_spot():
 
     try:
         while True:
+            # hot reload keywords so git pull takes effect without restart
             if time.time() - last_keyword_reload > KEYWORD_RELOAD_INTERVAL:
                 reload_keywords()
                 last_keyword_reload = time.time()
 
-            process_died = ffmpeg_proc.poll() is not None
-            in_grace     = (time.time() - started_at) < STARTUP_GRACE_SECONDS
+            # restart ffmpeg if it crashed or the stream went silent
+            # grace period suppresses false stall detections right after a (re)start
+            process_died   = ffmpeg_proc.poll() is not None
+            in_grace       = (time.time() - started_at) < STARTUP_GRACE_SECONDS
             stream_stalled = (
                 not in_grace
                 and (time.time() - last_segment_time) > MAX_STALL_SECONDS
@@ -603,24 +596,27 @@ def listen_and_spot():
                 last_segment_time = time.time()
                 started_at        = time.time()
 
+                # send crash alert if it keeps happening
                 if consecutive_restarts >= CRASH_ALERT_THRESHOLD:
                     send_crash_alert(reason, consecutive_restarts)
-                    consecutive_restarts = 0  # reset after alerting to avoid spam
+                    consecutive_restarts = 0  # reset after alerting so we don't spam
 
                 time.sleep(3)
                 continue
 
-            # successful segment processing resets the restart counter
+            # reset restart counter on any successful segment processing
             consecutive_restarts = 0
 
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
 
+            # need at least 2 files so we're never touching the one ffmpeg is writing
             if len(files) <= 1:
                 time.sleep(1)
                 continue
 
             last_segment_time = time.time()
 
+            # if we're falling behind just drop the old chunks and catch up
             if len(files) > MAX_QUEUED_CHUNKS:
                 log.warning(f"Backlog of {len(files)} chunks — purging oldest to catch up.")
                 for stale in files[: len(files) - MAX_QUEUED_CHUNKS]:
@@ -641,6 +637,11 @@ def listen_and_spot():
                     target_file,
                     beam_size=1,
                     vad_filter=True,
+                    vad_parameters=dict(
+                        threshold=0.3,
+                        min_speech_duration_ms=500,
+                        min_silence_duration_ms=500,
+                    ),
                     condition_on_previous_text=False,
                     temperature=0.0,
                 )
@@ -651,14 +652,16 @@ def listen_and_spot():
                     with open(LOG_FILE, "a", encoding="utf-8") as lf:
                         lf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {full_text}\n")
 
+                    # prepend tail of previous chunk so keywords split across
+                    # chunk boundaries don't get missed
                     combined_text = (previous_tail + " " + full_text).strip()
 
                     if keyword_spotted(combined_text):
-                        if BATCH_MODE:
-                            add_to_batch(combined_text)
-                        else:
-                            send_email_blast(combined_text)
+                        # always send immediate alert AND add to batch for end of day summary
+                        send_email_blast(combined_text)
+                        add_to_batch(combined_text)
 
+                    # save last N words for next chunk
                     words = full_text.split()
                     previous_tail = (
                         " ".join(words[-OVERLAP_WORD_COUNT:])
@@ -677,7 +680,7 @@ def listen_and_spot():
 
     except KeyboardInterrupt:
         log.info("Shutting down...")
-        if BATCH_MODE and batch_detections:
+        if batch_detections:
             log.info("[BATCH] Unsent detections saved to batch_detections.json for next session.")
     finally:
         kill_ffmpeg(ffmpeg_proc)
