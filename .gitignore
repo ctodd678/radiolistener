@@ -7,3 +7,4 @@ __pycache__/
 test_email.py
 radio_listener.log
 batch_detections.json
+test_gemin.py

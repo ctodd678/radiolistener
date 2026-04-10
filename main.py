@@ -187,7 +187,6 @@ def extract_keywords_with_gemini(detections):
         log.error(f"Gemini API error: {e} — falling back to raw detections.")
         return [d["text"] for d in detections]
 
-# --- BATCH SUMMARY EMAIL ---
 def send_batch_email():
     global batch_sent_today
 
@@ -203,18 +202,53 @@ def send_batch_email():
 
     extracted = extract_keywords_with_gemini(detections)
 
+    # map each detection to its hour and extracted keyword
+    hour_to_keyword = {}
+    for i, (d, line) in enumerate(zip(detections, extracted)):
+        word = re.sub(r"^\d+\.\s*", "", line).strip().lower()
+        if not word:
+            word = "unclear"
+        try:
+            hour = datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S").hour
+        except Exception:
+            continue
+        # only keep real keywords, don't overwrite a real keyword with unclear
+        if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
+            hour_to_keyword[hour] = word
+
+    # build the full schedule for today — weekdays 6am-8pm (14 slots)
+    now     = datetime.now()
+    weekday = now.weekday()
+    if weekday < 5:
+        schedule_hours = list(range(6, 20))   # 6am to 7pm = 14 slots
+    else:
+        schedule_hours = list(range(13, 18))  # weekends 1pm to 5pm = 5 slots
+
+    schedule_lines = []
+    found_keywords = []
+    for hour in schedule_hours:
+        label = datetime.now().replace(hour=hour, minute=0).strftime("%-I:%M%p").lstrip("0") \
+            if os.name != "nt" else f"{hour % 12 or 12}:00{'AM' if hour < 12 else 'PM'}"
+        keyword = hour_to_keyword.get(hour, "unclear")
+        schedule_lines.append(f"  {label}: {keyword.upper() if keyword != 'unclear' else 'unclear'}")
+        if keyword != "unclear":
+            found_keywords.append(keyword.upper())
+
+    schedule_section = "\n".join(schedule_lines)
+    keywords_section = ", ".join(found_keywords) if found_keywords else "none detected"
+
     raw_section = "\n".join(
         f"  {i+1}. [{d['timestamp']}] {d['text']}"
         for i, d in enumerate(detections)
     )
-    extracted_section = "\n".join(f"  {line}" for line in extracted)
 
     body = (
         f"Radio Listener End-of-Day Summary\n"
         f"Date: {time.strftime('%Y-%m-%d')}\n"
-        f"Total detections: {len(detections)}\n\n"
-        f"--- AI EXTRACTED KEYWORDS ---\n"
-        f"{extracted_section}\n\n"
+        f"Total detections: {len(detections)}\n"
+        f"Keywords found: {keywords_section}\n\n"
+        f"--- KEYWORD SCHEDULE ---\n"
+        f"{schedule_section}\n\n"
         f"--- RAW DETECTIONS ---\n"
         f"{raw_section}\n"
     )
@@ -226,11 +260,11 @@ def send_batch_email():
                 for recipient in RECIPIENTS:
                     msg = EmailMessage()
                     msg.set_content(body)
-                    msg["Subject"] = f"Radio Listener Summary: {time.strftime('%b %d %Y')}"
+                    msg["Subject"] = f"Radio Listener Summary: {time.strftime('%b %d %Y')} — {keywords_section}"
                     msg["From"]    = SENDER_EMAIL
                     msg["To"]      = recipient
                     server.send_message(msg)
-            log.info(f"[BATCH] Summary email sent to {len(RECIPIENTS)} recipient(s).")
+            log.info(f"[BATCH] Summary email sent. Keywords: {keywords_section}")
             clear_batch()
             batch_sent_today = True
             return
