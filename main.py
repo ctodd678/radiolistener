@@ -91,7 +91,8 @@ batch_lock       = threading.Lock()
 batch_sent_today = False
 
 def load_batch():
-    # load persisted detections from previous runs, but only keep today's so we don't accidentally email old ones
+    # load persisted detections from previous runs, but only keep today's
+    # so we don't accidentally email old ones
     if os.path.exists(BATCH_FILE):
         try:
             with open(BATCH_FILE, "r", encoding="utf-8") as f:
@@ -113,6 +114,11 @@ def save_batch(detections):
         log.warning(f"Failed to save batch file: {e}")
 
 def add_to_batch(text):
+    # only queue detections during contest hours — no point keeping overnight noise
+    if not is_contest_active():
+        log.info(f"[BATCH] Outside contest hours — not batching.")
+        return
+
     global batch_detections
     entry = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -135,7 +141,7 @@ log.info(f"Loaded {len(batch_detections)} existing detections from previous sess
 # --- GEMINI KEYWORD EXTRACTION ---
 def extract_keywords_with_gemini(detections):
     # ask gemini to pull just the contest word out of each raw detection
-    # falls back to raw texts if the api call fails
+    # falls back to raw texts if the api call fails or looks malformed
     if not GEMINI_KEY:
         log.warning("No Gemini API key in config.json — skipping AI extraction.")
         return [d["text"] for d in detections]
@@ -182,23 +188,35 @@ def extract_keywords_with_gemini(detections):
             result = json.loads(resp.read().decode("utf-8"))
             text = result["candidates"][0]["content"]["parts"][0]["text"]
             log.info(f"[GEMINI] Extraction result:\n{text}")
-            return text.strip().splitlines()
+
+            lines = text.strip().splitlines()
+
+            # sanity check — if first few lines are very long, gemini returned
+            # something unexpected (full sentences instead of single words)
+            if any(len(line.split()) > 5 for line in lines[:3]):
+                log.warning("[GEMINI] Response looks malformed — falling back to raw detections.")
+                return [d["text"] for d in detections]
+
+            return lines
     except Exception as e:
         log.error(f"Gemini API error: {e} — falling back to raw detections.")
         return [d["text"] for d in detections]
 
-def send_batch_email():
+def send_batch_email(clear=True):
     global batch_sent_today
 
     with batch_lock:
         detections = list(batch_detections)
 
     if not detections:
-        log.info("[BATCH] No detections today, skipping summary email.")
-        batch_sent_today = True
+        log.info("[BATCH] No detections, skipping summary email.")
+        if clear:
+            batch_sent_today = True
         return
 
-    log.info(f"[BATCH] Sending end-of-day summary with {len(detections)} detection(s).")
+    is_final      = clear
+    summary_label = "End-of-Day" if is_final else "Midday"
+    log.info(f"[BATCH] Sending {summary_label} summary with {len(detections)} detection(s).")
 
     extracted = extract_keywords_with_gemini(detections)
 
@@ -206,29 +224,31 @@ def send_batch_email():
     hour_to_keyword = {}
     for i, (d, line) in enumerate(zip(detections, extracted)):
         word = re.sub(r"^\d+\.\s*", "", line).strip().lower()
-        if not word:
+
+        # if gemini returned more than one word it didn't extract properly
+        if not word or len(word.split()) > 1:
             word = "unclear"
+
         try:
             hour = datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S").hour
         except Exception:
             continue
-        # only keep real keywords, don't overwrite a real keyword with unclear
+
+        # only keep real keywords, don't overwrite a good one with unclear
         if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
             hour_to_keyword[hour] = word
 
-    # build the full schedule for today — weekdays 6am-8pm (14 slots)
     now     = datetime.now()
     weekday = now.weekday()
     if weekday < 5:
-        schedule_hours = list(range(6, 20))   # 6am to 7pm = 14 slots
+        schedule_hours = list(range(6, 20))   # weekdays 6am to 7pm = 14 slots
     else:
         schedule_hours = list(range(13, 18))  # weekends 1pm to 5pm = 5 slots
 
     schedule_lines = []
     found_keywords = []
     for hour in schedule_hours:
-        label = datetime.now().replace(hour=hour, minute=0).strftime("%-I:%M%p").lstrip("0") \
-            if os.name != "nt" else f"{hour % 12 or 12}:00{'AM' if hour < 12 else 'PM'}"
+        label   = f"{hour % 12 or 12}:00{'AM' if hour < 12 else 'PM'}"
         keyword = hour_to_keyword.get(hour, "unclear")
         schedule_lines.append(f"  {label}: {keyword.upper() if keyword != 'unclear' else 'unclear'}")
         if keyword != "unclear":
@@ -243,7 +263,7 @@ def send_batch_email():
     )
 
     body = (
-        f"Radio Listener End-of-Day Summary\n"
+        f"Radio Listener {summary_label} Summary\n"
         f"Date: {time.strftime('%Y-%m-%d')}\n"
         f"Total detections: {len(detections)}\n"
         f"Keywords found: {keywords_section}\n\n"
@@ -253,6 +273,7 @@ def send_batch_email():
         f"{raw_section}\n"
     )
 
+    subject_label = "Midday Update" if not is_final else "Summary"
     for attempt in range(1, EMAIL_RETRIES + 1):
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
@@ -260,13 +281,14 @@ def send_batch_email():
                 for recipient in RECIPIENTS:
                     msg = EmailMessage()
                     msg.set_content(body)
-                    msg["Subject"] = f"Radio Listener Summary: {time.strftime('%b %d %Y')} — {keywords_section}"
+                    msg["Subject"] = f"Radio Listener {subject_label}: {time.strftime('%b %d %Y')} — {keywords_section}"
                     msg["From"]    = SENDER_EMAIL
                     msg["To"]      = recipient
                     server.send_message(msg)
-            log.info(f"[BATCH] Summary email sent. Keywords: {keywords_section}")
-            clear_batch()
-            batch_sent_today = True
+            log.info(f"[BATCH] {summary_label} email sent. Keywords: {keywords_section}")
+            if clear:
+                clear_batch()
+                batch_sent_today = True
             return
         except Exception as e:
             log.error(f"[BATCH] Email error (attempt {attempt}/{EMAIL_RETRIES}): {e}")
@@ -277,11 +299,13 @@ def send_batch_email():
 
 # --- BATCH SCHEDULER THREAD ---
 def batch_scheduler():
-    # fires the end-of-day summary once the contest window closes
-    # weekdays at 8pm, weekends at 6pm
-    # resets at midnight so the next day works
+    # midday summary at 1pm on weekdays (doesn't clear batch)
+    # end of day summary at 8pm weekdays / 6pm weekends (clears batch)
+    # resets at midnight
     global batch_sent_today
     log.info("[BATCH SCHEDULER] Started.")
+
+    midday_sent_today = False
 
     while True:
         now     = datetime.now()
@@ -290,14 +314,23 @@ def batch_scheduler():
         minute  = now.minute
 
         if hour == 0 and minute == 0:
-            batch_sent_today = False
+            batch_sent_today  = False
+            midday_sent_today = False
             log.info("[BATCH SCHEDULER] Daily reset.")
 
+        # midday summary at 1pm on weekdays only
+        if weekday < 5 and not midday_sent_today:
+            if hour == 13 and minute == 0:
+                log.info("[BATCH SCHEDULER] Midday summary (1:00PM) — sending.")
+                send_batch_email(clear=False)
+                midday_sent_today = True
+
+        # end of day summary
         if not batch_sent_today:
             end_hour = 20 if weekday < 5 else 18
             if hour == end_hour and minute == 0:
-                log.info(f"[BATCH SCHEDULER] Contest window closed ({end_hour}:00) — sending summary.")
-                send_batch_email()
+                log.info(f"[BATCH SCHEDULER] Contest window closed ({end_hour}:00) — sending final summary.")
+                send_batch_email(clear=True)
 
         time.sleep(30)
 
@@ -434,7 +467,7 @@ def is_hallucination(text):
     if len(words) < 3:
         return True
 
-    # repeated trigrams = whisper looping on itself, e.g. "i can't win i can't win"
+    # repeated trigrams = whisper looping on itself
     if len(words) >= 9:
         trigrams = [" ".join(words[i:i+3]) for i in range(len(words) - 2)]
         for trigram in trigrams:
@@ -448,24 +481,13 @@ def is_hallucination(text):
 def keyword_spotted(text_chunk):
     text_lower = text_chunk.lower()
 
-    # exclusions first — if any bad word is in the chunk just kill it
-    for bad_word in keywords.get("exclude_keywords", []):
-        if bad_word.lower() in text_lower:
-            log.info(f"[EXCLUDED] Matched '{bad_word}' — skipping.")
-            return False
-
-    # strict phrases checked before hallucination filter
-    # a short chunk like "keyword is sunshine" must not get dropped as too short
+    # strict phrases fire immediately — high confidence, exclusions don't apply
     for phrase in keywords.get("strict_keywords", []):
         if phrase.lower() in text_lower:
             log.info(f"[STRICT MATCH] '{phrase}'")
             return True
 
-    # hallucination check for softer contextual matches
-    if is_hallucination(text_chunk):
-        return False
-
-    # looks for 4+ single letters separated by hyphens or spaces
+    # spelling detector — also high confidence, checked before exclusions
     # catches "w-i-l-d", "G L O W", "s e a s o n" etc.
     spelling_regex   = r"\b([a-z](?:[- ][a-z]){3,})\b"
     has_spelled_word = bool(re.search(spelling_regex, text_lower))
@@ -482,6 +504,15 @@ def keyword_spotted(text_chunk):
         log.info(f"[SPELLING MATCH] Spelled word with contest context.")
         return True
 
+    # apply exclusions for softer matches only
+    for bad_word in keywords.get("exclude_keywords", []):
+        if bad_word.lower() in text_lower:
+            log.info(f"[EXCLUDED] Matched '{bad_word}' — skipping.")
+            return False
+
+    if is_hallucination(text_chunk):
+        return False
+
     # shortcode by itself isn't enough, need at least one other signal
     if has_shortcode:
         if has_prize_context or has_keyword_mention:
@@ -489,10 +520,12 @@ def keyword_spotted(text_chunk):
             return True
         return False
 
-    # fallback during contest hours only
+    # prize match fallback — tightened to require shortcode OR spelling
+    # plain mentions of "$80,000" and "keyword" in a promo jingle won't fire this
     if is_contest_active() and has_prize_context and has_keyword_mention:
-        log.info(f"[PRIZE MATCH] Prize context during contest hours.")
-        return True
+        if has_shortcode or has_spelled_word:
+            log.info(f"[PRIZE MATCH] Prize context during contest hours.")
+            return True
 
     return False
 
@@ -691,7 +724,6 @@ def listen_and_spot():
                     combined_text = (previous_tail + " " + full_text).strip()
 
                     if keyword_spotted(combined_text):
-                        # always send immediate alert AND add to batch for end of day summary
                         send_email_blast(combined_text)
                         add_to_batch(combined_text)
 
