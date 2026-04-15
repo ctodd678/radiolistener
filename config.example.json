@@ -5,6 +5,6 @@
     "recipients": [
         "friend@example.com"
     ],
-    "batch_mode": false,
-    "stream_url": "YOUR_AUDIO_OR_RADIO_STREAM_URL",
+    "instant_alerts": false,
+    "stream_url": "YOUR_AUDIO_OR_RADIO_STREAM_URL"
 }

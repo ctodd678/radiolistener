@@ -4,7 +4,7 @@ import time
 import glob
 import wave
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import smtplib
 import json
 from email.message import EmailMessage
@@ -80,11 +80,15 @@ BASE_DIR = (
     else os.path.join(os.path.dirname(__file__), "data")
 )
 
+SCRIPT_DIR  = os.path.dirname(__file__)
 SEGMENT_DIR = os.path.join(BASE_DIR, "segments")
-LOG_FILE    = os.path.join(os.path.dirname(__file__), "radio_transcript.txt")
-BATCH_FILE  = os.path.join(os.path.dirname(__file__), "batch_detections.json")
+LOG_FILE    = os.path.join(SCRIPT_DIR, "radio_transcript.txt")
+APP_LOG     = os.path.join(SCRIPT_DIR, "radio_listener.log")
+BATCH_FILE  = os.path.join(SCRIPT_DIR, "batch_detections.json")
+ARCHIVE_DIR = os.path.join(SCRIPT_DIR, "archive")
 
 os.makedirs(SEGMENT_DIR, exist_ok=True)
+os.makedirs(ARCHIVE_DIR, exist_ok=True)
 log.info(f"Segment dir: {SEGMENT_DIR}")
 
 # --- BATCH STORAGE ---
@@ -138,6 +142,26 @@ def clear_batch():
 
 batch_detections = load_batch()
 log.info(f"Loaded {len(batch_detections)} existing detections from previous session.")
+
+# --- LOG ARCHIVING ---
+def archive_daily_logs():
+    # move yesterday's logs into archive/ with the date in the filename
+    # archive/radio_transcript_2026-04-15.txt, archive/radio_listener_2026-04-15.log
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        files = {
+            LOG_FILE: os.path.join(ARCHIVE_DIR, f"radio_transcript_{yesterday}.txt"),
+            APP_LOG:  os.path.join(ARCHIVE_DIR, f"radio_listener_{yesterday}.log"),
+        }
+        for src, dest in files.items():
+            if os.path.exists(src) and os.path.getsize(src) > 0:
+                os.replace(src, dest)
+                log.info(f"Archived {src} -> {dest}")
+        # create fresh empty files so the logger doesn't error on next write
+        open(LOG_FILE, "w").close()
+        open(APP_LOG, "w").close()
+    except Exception as e:
+        log.warning(f"Failed to archive logs: {e}")
 
 # --- GEMINI KEYWORD EXTRACTION ---
 def extract_keywords_with_gemini(detections):
@@ -310,7 +334,7 @@ def send_batch_email(clear=True):
 def batch_scheduler():
     # midday summary at 1pm on weekdays (doesn't clear batch)
     # end of day summary at 8pm weekdays / 6pm weekends (clears batch)
-    # resets at midnight
+    # archives logs and resets at midnight
     global batch_sent_today
     log.info("[BATCH SCHEDULER] Started.")
 
@@ -323,6 +347,7 @@ def batch_scheduler():
         minute  = now.minute
 
         if hour == 0 and minute == 0:
+            archive_daily_logs()
             batch_sent_today  = False
             midday_sent_today = False
             log.info("[BATCH SCHEDULER] Daily reset.")
