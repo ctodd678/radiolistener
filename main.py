@@ -53,6 +53,7 @@ SENDER_EMAIL = config["sender_email"]
 APP_PASSWORD = config["app_password"]
 RECIPIENTS   = config["recipients"]
 GEMINI_KEY   = config.get("gemini_api_key", "")
+INSTANT_ALERTS = True  # set to False to disable instant emails and only get batch summaries
 
 STREAM_URL = "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8"
 MODEL_SIZE = "small"
@@ -724,7 +725,8 @@ def listen_and_spot():
                     combined_text = (previous_tail + " " + full_text).strip()
 
                     if keyword_spotted(combined_text):
-                        send_email_blast(combined_text)
+                        if INSTANT_ALERTS:
+                            send_email_blast(combined_text)
                         add_to_batch(combined_text)
 
                     # save last N words for next chunk
