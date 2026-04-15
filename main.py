@@ -49,13 +49,13 @@ def load_keywords():
 config   = load_config()
 keywords = load_keywords()
 
-SENDER_EMAIL = config["sender_email"]
-APP_PASSWORD = config["app_password"]
-RECIPIENTS   = config["recipients"]
-GEMINI_KEY   = config.get("gemini_api_key", "")
-INSTANT_ALERTS = True  # set to False to disable instant emails and only get batch summaries
+SENDER_EMAIL   = config["sender_email"]
+APP_PASSWORD   = config["app_password"]
+RECIPIENTS     = config["recipients"]
+GEMINI_KEY     = config.get("gemini_api_key", "")
+INSTANT_ALERTS = config.get("instant_alerts", True)
 
-STREAM_URL = "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8"
+STREAM_URL = config.get("stream_url", "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8")
 MODEL_SIZE = "small"
 
 # heartbeat hours (24h) and crash alert threshold pulled from config
@@ -141,11 +141,11 @@ log.info(f"Loaded {len(batch_detections)} existing detections from previous sess
 
 # --- GEMINI KEYWORD EXTRACTION ---
 def extract_keywords_with_gemini(detections):
-    # ask gemini to pull just the contest word out of each raw detection
-    # falls back to raw texts if the api call fails or looks malformed
+    # returns a list of extracted keyword lines, or None if extraction failed/unavailable
+    # None signals send_batch_email to skip schedule building and show raw detections only
     if not GEMINI_KEY:
         log.warning("No Gemini API key in config.json — skipping AI extraction.")
-        return [d["text"] for d in detections]
+        return None
 
     raw_texts = "\n".join(
         f"{i+1}. [{d['timestamp']}] {d['text']}"
@@ -192,16 +192,21 @@ def extract_keywords_with_gemini(detections):
 
             lines = text.strip().splitlines()
 
-            # sanity check — if first few lines are very long, gemini returned
-            # something unexpected (full sentences instead of single words)
-            if any(len(line.split()) > 5 for line in lines[:3]):
-                log.warning("[GEMINI] Response looks malformed — falling back to raw detections.")
-                return [d["text"] for d in detections]
+            # gemini 2.5 flash sometimes outputs a thinking preamble before the
+            # numbered list — strip any lines that appear before the first "1."
+            numbered = [l for l in lines if re.match(r"^\d+\.", l.strip())]
+            if len(numbered) >= max(1, len(detections) // 2):
+                # enough numbered lines found, use them and discard any preamble
+                lines = numbered
+            elif any(len(line.split()) > 5 for line in lines[:3]):
+                # first few lines are long sentences — response looks totally wrong
+                log.warning("[GEMINI] Response looks malformed — skipping extraction.")
+                return None
 
             return lines
     except Exception as e:
-        log.error(f"Gemini API error: {e} — falling back to raw detections.")
-        return [d["text"] for d in detections]
+        log.error(f"Gemini API error: {e} — skipping extraction.")
+        return None
 
 def send_batch_email(clear=True):
     global batch_sent_today
@@ -221,23 +226,26 @@ def send_batch_email(clear=True):
 
     extracted = extract_keywords_with_gemini(detections)
 
-    # map each detection to its hour and extracted keyword
+    # build keyword schedule only if gemini returned usable output
     hour_to_keyword = {}
-    for i, (d, line) in enumerate(zip(detections, extracted)):
-        word = re.sub(r"^\d+\.\s*", "", line).strip().lower()
+    if extracted is not None:
+        for i, (d, line) in enumerate(zip(detections, extracted)):
+            word = re.sub(r"^\d+\.\s*", "", line).strip().lower()
 
-        # if gemini returned more than one word it didn't extract properly
-        if not word or len(word.split()) > 1:
-            word = "unclear"
+            # more than one word means gemini didn't extract cleanly
+            if not word or len(word.split()) > 1:
+                word = "unclear"
 
-        try:
-            hour = datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S").hour
-        except Exception:
-            continue
+            try:
+                hour = datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S").hour
+            except Exception:
+                continue
 
-        # only keep real keywords, don't overwrite a good one with unclear
-        if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
-            hour_to_keyword[hour] = word
+            # don't overwrite a real keyword with unclear
+            if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
+                hour_to_keyword[hour] = word
+    else:
+        log.warning("[BATCH] Gemini extraction unavailable — schedule will show unclear.")
 
     now     = datetime.now()
     weekday = now.weekday()

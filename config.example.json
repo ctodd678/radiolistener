@@ -1,9 +1,10 @@
 {
     "sender_email": "YOUR_EMAIL@gmail.com",
     "app_password": "YOUR_APP_PASSWORD",
-    "batch_mode": false,
     "gemini_api_key": "YOUR_GEMINI_API_KEY",
     "recipients": [
         "friend@example.com"
-    ]
+    ],
+    "batch_mode": false,
+    "stream_url": "YOUR_AUDIO_OR_RADIO_STREAM_URL",
 }
