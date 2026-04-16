@@ -10,3 +10,4 @@ batch_detections.json
 test_gemin.py
 archive/
 config copy.json
+test_openai.py
