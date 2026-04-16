@@ -1,10 +1,16 @@
 {
-    "sender_email": "YOUR_EMAIL@gmail.com",
-    "app_password": "YOUR_APP_PASSWORD",
-    "gemini_api_key": "YOUR_GEMINI_API_KEY",
+    "sender_email": "you@gmail.com",
+    "app_password": "your_gmail_app_password",
     "recipients": [
-        "friend@example.com"
+        "you@gmail.com"
     ],
+    "openai_api_key": "sk-...",
     "instant_alerts": false,
-    "stream_url": "YOUR_AUDIO_OR_RADIO_STREAM_URL"
+    "station_name": "CHUM 104.5",
+    "stream_url": "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8",
+    "heartbeat_hours": [
+        12,
+        16
+    ],
+    "crash_alert_threshold": 3
 }

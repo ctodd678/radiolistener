@@ -52,8 +52,9 @@ keywords = load_keywords()
 SENDER_EMAIL   = config["sender_email"]
 APP_PASSWORD   = config["app_password"]
 RECIPIENTS     = config["recipients"]
-GEMINI_KEY     = config.get("gemini_api_key", "")
+OPENAI_KEY     = config.get("openai_api_key", "")
 INSTANT_ALERTS = config.get("instant_alerts", True)
+STATION_NAME   = config.get("station_name", "Radio Listener")
 
 STREAM_URL = config.get("stream_url", "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8")
 MODEL_SIZE = "small"
@@ -146,7 +147,7 @@ log.info(f"Loaded {len(batch_detections)} existing detections from previous sess
 # --- LOG ARCHIVING ---
 def archive_daily_logs():
     # move yesterday's logs into archive/ with the date in the filename
-    # archive/radio_transcript_2026-04-15.txt, archive/radio_listener_2026-04-15.log
+    # e.g. archive/radio_transcript_2026-04-15.txt
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         files = {
@@ -163,12 +164,12 @@ def archive_daily_logs():
     except Exception as e:
         log.warning(f"Failed to archive logs: {e}")
 
-# --- GEMINI KEYWORD EXTRACTION ---
-def extract_keywords_with_gemini(detections):
-    # returns a list of extracted keyword lines, or None if extraction failed/unavailable
-    # None signals send_batch_email to skip schedule building and show raw detections only
-    if not GEMINI_KEY:
-        log.warning("No Gemini API key in config.json — skipping AI extraction.")
+# --- KEYWORD EXTRACTION ---
+def extract_keywords_with_openai(detections):
+    # returns a list of extracted keyword lines, or None if extraction failed
+    # None signals send_batch_email to skip schedule building
+    if not OPENAI_KEY:
+        log.warning("No openai_api_key in config.json — skipping AI extraction.")
         return None
 
     raw_texts = "\n".join(
@@ -194,43 +195,60 @@ def extract_keywords_with_gemini(detections):
     )
 
     payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}]
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0,
+        "max_tokens": 500,
     }).encode("utf-8")
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-    )
 
     try:
         req = urllib.request.Request(
-            url,
+            "https://api.openai.com/v1/chat/completions",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_KEY}",
+            },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
-            log.info(f"[GEMINI] Extraction result:\n{text}")
+            text = result["choices"][0]["message"]["content"]
+            log.info(f"[OPENAI] Extraction result:\n{text}")
 
             lines = text.strip().splitlines()
 
-            # gemini 2.5 flash sometimes outputs a thinking preamble before the
-            # numbered list — strip any lines that appear before the first "1."
+            # strip any preamble before the first numbered line
             numbered = [l for l in lines if re.match(r"^\d+\.", l.strip())]
             if len(numbered) >= max(1, len(detections) // 2):
-                # enough numbered lines found, use them and discard any preamble
                 lines = numbered
             elif any(len(line.split()) > 5 for line in lines[:3]):
-                # first few lines are long sentences — response looks totally wrong
-                log.warning("[GEMINI] Response looks malformed — skipping extraction.")
+                log.warning("[OPENAI] Response looks malformed — skipping extraction.")
                 return None
 
             return lines
     except Exception as e:
-        log.error(f"Gemini API error: {e} — skipping extraction.")
+        log.error(f"OpenAI API error: {e} — skipping extraction.")
         return None
+
+def extract_keywords_from_text(text):
+    # regex fallback when AI extraction is unavailable
+    # catches the most common DJ announcement patterns
+    patterns = [
+        r"keyword(?:\s+to\s+cash)?\s+is\s+(?:the\s+word\s+)?([a-z]+)",
+        r"your\s+keyword\s+(?:right\s+now\s+)?is\s+([a-z]+)",
+        r"text\s+(?:the\s+word\s+)?([a-z]+)\s+(?:and\s+your|plus\s+your)",
+    ]
+    text_lower = text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            word = match.group(1).strip()
+            if len(word) > 2:
+                return word
+    return None
 
 def send_batch_email(clear=True):
     global batch_sent_today
@@ -248,28 +266,34 @@ def send_batch_email(clear=True):
     summary_label = "End-of-Day" if is_final else "Midday"
     log.info(f"[BATCH] Sending {summary_label} summary with {len(detections)} detection(s).")
 
-    extracted = extract_keywords_with_gemini(detections)
+    extracted = extract_keywords_with_openai(detections)
 
-    # build keyword schedule only if gemini returned usable output
+    # build keyword schedule — use AI output if available, else regex fallback
     hour_to_keyword = {}
     if extracted is not None:
         for i, (d, line) in enumerate(zip(detections, extracted)):
             word = re.sub(r"^\d+\.\s*", "", line).strip().lower()
-
-            # more than one word means gemini didn't extract cleanly
             if not word or len(word.split()) > 1:
                 word = "unclear"
-
             try:
                 hour = datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S").hour
             except Exception:
                 continue
-
-            # don't overwrite a real keyword with unclear
             if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
                 hour_to_keyword[hour] = word
     else:
-        log.warning("[BATCH] Gemini extraction unavailable — schedule will show unclear.")
+        # AI unavailable — try regex extraction so subject line isn't empty
+        log.warning("[BATCH] AI extraction unavailable — attempting regex fallback.")
+        for d in detections:
+            word = extract_keywords_from_text(d["text"])
+            if not word:
+                continue
+            try:
+                hour = datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S").hour
+            except Exception:
+                continue
+            if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
+                hour_to_keyword[hour] = word
 
     now     = datetime.now()
     weekday = now.weekday()
@@ -296,7 +320,7 @@ def send_batch_email(clear=True):
     )
 
     body = (
-        f"Radio Listener {summary_label} Summary\n"
+        f"{STATION_NAME} {summary_label} Summary\n"
         f"Date: {time.strftime('%Y-%m-%d')}\n"
         f"Total detections: {len(detections)}\n"
         f"Keywords found: {keywords_section}\n\n"
@@ -314,7 +338,7 @@ def send_batch_email(clear=True):
                 for recipient in RECIPIENTS:
                     msg = EmailMessage()
                     msg.set_content(body)
-                    msg["Subject"] = f"Radio Listener {subject_label}: {time.strftime('%b %d %Y')} — {keywords_section}"
+                    msg["Subject"] = f"{STATION_NAME} {subject_label}: {time.strftime('%b %d %Y')} — {keywords_section}"
                     msg["From"]    = SENDER_EMAIL
                     msg["To"]      = recipient
                     server.send_message(msg)
@@ -372,9 +396,9 @@ def batch_scheduler():
 def send_crash_alert(reason, restart_count):
     # fires when ffmpeg has restarted too many times in a row
     log.warning(f"[CRASH ALERT] Sending alert after {restart_count} restarts.")
-    subject = f"Radio Listener CRASH ALERT: {time.strftime('%I:%M%p').lstrip('0')}"
+    subject = f"{STATION_NAME} CRASH ALERT: {time.strftime('%I:%M%p').lstrip('0')}"
     body = (
-        f"Radio Listener has restarted {restart_count} times in a row.\n\n"
+        f"{STATION_NAME} has restarted {restart_count} times in a row.\n\n"
         f"Last reason: {reason}\n"
         f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         f"The app will keep trying to recover automatically. "
@@ -404,9 +428,9 @@ def send_heartbeat():
     with batch_lock:
         detection_count = len(batch_detections)
 
-    subject = f"Radio Listener OK: {time.strftime('%I:%M%p').lstrip('0')}"
+    subject = f"{STATION_NAME} OK: {time.strftime('%I:%M%p').lstrip('0')}"
     body = (
-        f"Radio Listener is running normally.\n\n"
+        f"{STATION_NAME} is running normally.\n\n"
         f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Detections so far today: {detection_count}\n"
     )
@@ -477,8 +501,8 @@ def send_email_blast(found_text):
                 server.login(SENDER_EMAIL, APP_PASSWORD)
                 for recipient in RECIPIENTS:
                     msg = EmailMessage()
-                    msg.set_content(f"Radio Listener Alert at {timestamp}:\n\n\"{found_text}\"")
-                    msg["Subject"] = f"Radio Alert: {timestamp}"
+                    msg.set_content(f"{STATION_NAME} Alert at {timestamp}:\n\n\"{found_text}\"")
+                    msg["Subject"] = f"{STATION_NAME} Alert: {timestamp}"
                     msg["From"]    = SENDER_EMAIL
                     msg["To"]      = recipient
                     server.send_message(msg)
@@ -656,7 +680,7 @@ def start_ffmpeg():
 
 # --- MAIN LOOP ---
 def listen_and_spot():
-    log.info(f"Radio Listener active (Whisper {MODEL_SIZE})")
+    log.info(f"{STATION_NAME} active (Whisper {MODEL_SIZE})")
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 
     # start background threads
