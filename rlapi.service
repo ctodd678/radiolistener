@@ -1,0 +1,15 @@
+[Unit]
+Description=Radio Listener API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/radiolistener
+ExecStart=/root/venv/bin/uvicorn api:app --host 0.0.0.0 --port 5001
+Restart=always
+RestartSec=5
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target
