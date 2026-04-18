@@ -1,16 +1,17 @@
 {
-    "sender_email": "you@gmail.com",
-    "app_password": "your_gmail_app_password",
-    "recipients": [
-        "you@gmail.com"
-    ],
-    "openai_api_key": "sk-...",
-    "instant_alerts": false,
-    "station_name": "CHUM 104.5",
-    "stream_url": "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8",
-    "heartbeat_hours": [
-        12,
-        16
-    ],
-    "crash_alert_threshold": 3
+  "sender_email": "you@gmail.com",
+  "app_password": "your_gmail_app_password",
+  "recipients": ["you@gmail.com"],
+  "openai_api_key": "sk-...",
+  "instant_alerts": false,
+  "station_name": "CHUM 104.5",
+  "stream_url": "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8",
+  "heartbeat_hours": [12, 16],
+  "crash_alert_threshold": 3,
+  "weekday_start": 6,
+  "weekday_end": 20,
+  "midday_hour": 13,
+  "run_weekends": true,
+  "weekend_start": 13,
+  "weekend_end": 18
 }

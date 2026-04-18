@@ -33,8 +33,6 @@ def load_config():
         return json.load(f)
 
 def load_keywords():
-    # separate from config so I can push keyword changes to github
-    # and pull them on the server without touching credentials
     keywords_path = os.path.join(os.path.dirname(__file__), "keywords.json")
     with open(keywords_path, "r") as f:
         data = json.load(f)
@@ -55,13 +53,21 @@ RECIPIENTS     = config["recipients"]
 OPENAI_KEY     = config.get("openai_api_key", "")
 INSTANT_ALERTS = config.get("instant_alerts", True)
 STATION_NAME   = config.get("station_name", "Radio Listener")
+STREAM_URL     = config.get("stream_url", "")
+MODEL_SIZE     = "small"
 
-STREAM_URL = config.get("stream_url", "https://playerservices.streamtheworld.com/api/livestream-redirect/CHUMFM_ADP.m3u8")
-MODEL_SIZE = "small"
-
-# heartbeat hours (24h) and crash alert threshold pulled from config
 HEARTBEAT_HOURS       = config.get("heartbeat_hours", [12, 16])
 CRASH_ALERT_THRESHOLD = config.get("crash_alert_threshold", 3)
+
+# --- CONTEST HOURS (from config, with sensible defaults) ---
+WEEKDAY_START  = config.get("weekday_start", 6)
+WEEKDAY_END    = config.get("weekday_end", 20)
+WEEKEND_START  = config.get("weekend_start", 13)
+WEEKEND_END    = config.get("weekend_end", 18)
+RUN_WEEKENDS   = config.get("run_weekends", True)
+
+# midday summary fires halfway through the contest window
+MIDDAY_HOUR = config.get("midday_hour", (WEEKDAY_START + WEEKDAY_END) // 2)
 
 # --- TUNING ---
 SEGMENT_TIME_SECONDS    = 30
@@ -73,7 +79,6 @@ EMAIL_RETRIES           = 3
 OVERLAP_WORD_COUNT      = 30
 
 # --- PATHS ---
-# use ramdisk if available, otherwise just dump in /data
 RAMDISK_PATH = "/mnt/ramdisk"
 BASE_DIR = (
     os.path.join(RAMDISK_PATH, "radiolistener")
@@ -81,24 +86,24 @@ BASE_DIR = (
     else os.path.join(os.path.dirname(__file__), "data")
 )
 
-SCRIPT_DIR  = os.path.dirname(__file__)
-SEGMENT_DIR = os.path.join(BASE_DIR, "segments")
-LOG_FILE    = os.path.join(SCRIPT_DIR, "radio_transcript.txt")
-APP_LOG     = os.path.join(SCRIPT_DIR, "radio_listener.log")
-BATCH_FILE  = os.path.join(SCRIPT_DIR, "batch_detections.json")
-ARCHIVE_DIR = os.path.join(SCRIPT_DIR, "archive")
+SCRIPT_DIR    = os.path.dirname(__file__)
+SEGMENT_DIR   = os.path.join(BASE_DIR, "segments")
+LOG_FILE      = os.path.join(SCRIPT_DIR, "radio_transcript.txt")
+APP_LOG       = os.path.join(SCRIPT_DIR, "radio_listener.log")
+BATCH_FILE    = os.path.join(SCRIPT_DIR, "batch_detections.json")
+SCHEDULE_FILE = os.path.join(SCRIPT_DIR, "keyword_schedule.json")
+ARCHIVE_DIR   = os.path.join(SCRIPT_DIR, "archive")
 
 os.makedirs(SEGMENT_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 log.info(f"Segment dir: {SEGMENT_DIR}")
+log.info(f"Contest hours — weekdays {WEEKDAY_START}:00-{WEEKDAY_END}:00 | weekends {'disabled' if not RUN_WEEKENDS else f'{WEEKEND_START}:00-{WEEKEND_END}:00'}")
 
 # --- BATCH STORAGE ---
 batch_lock       = threading.Lock()
 batch_sent_today = False
 
 def load_batch():
-    # load persisted detections from previous runs, but only keep today's
-    # so we don't accidentally email old ones
     if os.path.exists(BATCH_FILE):
         try:
             with open(BATCH_FILE, "r", encoding="utf-8") as f:
@@ -120,7 +125,6 @@ def save_batch(detections):
         log.warning(f"Failed to save batch file: {e}")
 
 def add_to_batch(text):
-    # only queue detections during contest hours — no point keeping overnight noise
     if not is_contest_active():
         log.info(f"[BATCH] Outside contest hours — not batching.")
         return
@@ -144,10 +148,36 @@ def clear_batch():
 batch_detections = load_batch()
 log.info(f"Loaded {len(batch_detections)} existing detections from previous session.")
 
+# --- KEYWORD SCHEDULE ---
+def save_keyword_schedule(hour_to_keyword, schedule_hours, label):
+    """
+    Writes keyword_schedule.json after each batch extraction.
+    The dashboard reads this file to display the hourly keyword grid.
+    """
+    slots = []
+    for hour in schedule_hours:
+        keyword = hour_to_keyword.get(hour, "unclear")
+        slots.append({
+            "hour":    hour,
+            "label":   f"{hour % 12 or 12}:00{'AM' if hour < 12 else 'PM'}",
+            "keyword": keyword,
+        })
+
+    data = {
+        "date":       time.strftime("%Y-%m-%d"),
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "summary":    label,
+        "slots":      slots,
+    }
+    try:
+        with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        log.info(f"[SCHEDULE] keyword_schedule.json updated ({len(slots)} slots).")
+    except Exception as e:
+        log.warning(f"[SCHEDULE] Failed to write keyword_schedule.json: {e}")
+
 # --- LOG ARCHIVING ---
 def archive_daily_logs():
-    # move yesterday's logs into archive/ with the date in the filename
-    # e.g. archive/radio_transcript_2026-04-15.txt
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         files = {
@@ -158,16 +188,17 @@ def archive_daily_logs():
             if os.path.exists(src) and os.path.getsize(src) > 0:
                 os.replace(src, dest)
                 log.info(f"Archived {src} -> {dest}")
-        # create fresh empty files so the logger doesn't error on next write
         open(LOG_FILE, "w").close()
         open(APP_LOG, "w").close()
+        # archive the schedule too
+        schedule_dest = os.path.join(ARCHIVE_DIR, f"keyword_schedule_{yesterday}.json")
+        if os.path.exists(SCHEDULE_FILE):
+            os.replace(SCHEDULE_FILE, schedule_dest)
     except Exception as e:
         log.warning(f"Failed to archive logs: {e}")
 
 # --- KEYWORD EXTRACTION ---
 def extract_keywords_with_openai(detections):
-    # returns a list of extracted keyword lines, or None if extraction failed
-    # None signals send_batch_email to skip schedule building
     if not OPENAI_KEY:
         log.warning("No openai_api_key in config.json — skipping AI extraction.")
         return None
@@ -180,11 +211,11 @@ def extract_keywords_with_openai(detections):
     prompt = (
         "You are extracting contest keywords from radio transcripts.\n\n"
         "Rules:\n"
-        "1. Each item is a radio segment where a DJ may have announced a keyword to cash contest word.\n"
+        "1. Each item is a radio segment where a DJ announced a keyword contest word.\n"
         "2. For each item output ONLY the single contest keyword the DJ announced.\n"
         "3. The keyword is always a single common English word (e.g. schedule, sunshine, ocean).\n"
         "4. The DJ usually says it explicitly: your keyword is X or keyword to cash is X or spells it out.\n"
-        "5. If you cannot find a clear keyword, write unclear.\n"
+        "5. If you cannot find a clear keyword write unclear.\n"
         "6. Output EXACTLY one line per input item, in order. Do not skip any items.\n"
         "7. Output ONLY a numbered list. One word per line. No explanation. No punctuation after the word.\n\n"
         "Example output for 3 inputs:\n"
@@ -197,9 +228,7 @@ def extract_keywords_with_openai(detections):
 
     payload = json.dumps({
         "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": 500,
     }).encode("utf-8")
@@ -220,8 +249,6 @@ def extract_keywords_with_openai(detections):
             log.info(f"[OPENAI] Extraction result:\n{text}")
 
             lines = text.strip().splitlines()
-
-            # strip any preamble before the first numbered line
             numbered = [l for l in lines if re.match(r"^\d+\.", l.strip())]
             if len(numbered) >= max(1, len(detections) // 2):
                 lines = numbered
@@ -235,8 +262,6 @@ def extract_keywords_with_openai(detections):
         return None
 
 def extract_keywords_from_text(text):
-    # regex fallback when AI extraction is unavailable
-    # catches the most common DJ announcement patterns
     patterns = [
         r"keyword(?:\s+to\s+cash)?\s+is\s+(?:the\s+word\s+)?([a-z]+)",
         r"your\s+keyword\s+(?:right\s+now\s+)?is\s+([a-z]+)",
@@ -251,11 +276,29 @@ def extract_keywords_from_text(text):
                 return word
     return None
 
+def get_schedule_hours():
+    """returns the list of hours to show in the keyword schedule for today"""
+    now     = datetime.now()
+    weekday = now.weekday()
+    if weekday < 5:
+        return list(range(WEEKDAY_START, WEEKDAY_END))
+    elif RUN_WEEKENDS:
+        return list(range(WEEKEND_START, WEEKEND_END))
+    return []
+
 def send_batch_email(clear=True):
     global batch_sent_today
 
     with batch_lock:
         detections = list(batch_detections)
+
+    # for midday cutoff — only include detections before now
+    if not clear:
+        cutoff_hour = datetime.now().hour
+        detections = [
+            d for d in detections
+            if datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S").hour < cutoff_hour
+        ]
 
     if not detections:
         log.info("[BATCH] No detections, skipping summary email.")
@@ -269,7 +312,7 @@ def send_batch_email(clear=True):
 
     extracted = extract_keywords_with_openai(detections)
 
-    # build keyword schedule — use AI output if available, else regex fallback
+    # build keyword schedule
     hour_to_keyword = {}
     if extracted is not None:
         for i, (d, line) in enumerate(zip(detections, extracted)):
@@ -283,7 +326,6 @@ def send_batch_email(clear=True):
             if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
                 hour_to_keyword[hour] = word
     else:
-        # AI unavailable — try regex extraction so subject line isn't empty
         log.warning("[BATCH] AI extraction unavailable — attempting regex fallback.")
         for d in detections:
             word = extract_keywords_from_text(d["text"])
@@ -296,12 +338,10 @@ def send_batch_email(clear=True):
             if hour not in hour_to_keyword or hour_to_keyword[hour] == "unclear":
                 hour_to_keyword[hour] = word
 
-    now     = datetime.now()
-    weekday = now.weekday()
-    if weekday < 5:
-        schedule_hours = list(range(6, 20))   # weekdays 6am to 7pm = 14 slots
-    else:
-        schedule_hours = list(range(13, 18))  # weekends 1pm to 5pm = 5 slots
+    schedule_hours = get_schedule_hours()
+
+    # write keyword_schedule.json so the dashboard can read it
+    save_keyword_schedule(hour_to_keyword, schedule_hours, summary_label)
 
     schedule_lines = []
     found_keywords = []
@@ -357,9 +397,6 @@ def send_batch_email(clear=True):
 
 # --- BATCH SCHEDULER THREAD ---
 def batch_scheduler():
-    # midday summary at 1pm on weekdays (doesn't clear batch)
-    # end of day summary at 8pm weekdays / 6pm weekends (clears batch)
-    # archives logs and resets at midnight
     global batch_sent_today
     log.info("[BATCH SCHEDULER] Started.")
 
@@ -377,16 +414,16 @@ def batch_scheduler():
             midday_sent_today = False
             log.info("[BATCH SCHEDULER] Daily reset.")
 
-        # midday summary at 1pm on weekdays only
+        # midday summary — weekdays only, at MIDDAY_HOUR
         if weekday < 5 and not midday_sent_today:
-            if hour == 13 and minute == 0:
-                log.info("[BATCH SCHEDULER] Midday summary (1:00PM) — sending.")
+            if hour == MIDDAY_HOUR and minute == 0:
+                log.info(f"[BATCH SCHEDULER] Midday summary ({MIDDAY_HOUR}:00) — sending.")
                 send_batch_email(clear=False)
                 midday_sent_today = True
 
         # end of day summary
         if not batch_sent_today:
-            end_hour = 20 if weekday < 5 else 18
+            end_hour = WEEKDAY_END if weekday < 5 else WEEKEND_END
             if hour == end_hour and minute == 0:
                 log.info(f"[BATCH SCHEDULER] Contest window closed ({end_hour}:00) — sending final summary.")
                 send_batch_email(clear=True)
@@ -395,7 +432,6 @@ def batch_scheduler():
 
 # --- CRASH ALERT ---
 def send_crash_alert(reason, restart_count):
-    # fires when ffmpeg has restarted too many times in a row
     log.warning(f"[CRASH ALERT] Sending alert after {restart_count} restarts.")
     subject = f"{STATION_NAME} CRASH ALERT: {time.strftime('%I:%M%p').lstrip('0')}"
     body = (
@@ -425,7 +461,6 @@ def send_crash_alert(reason, restart_count):
 
 # --- HEARTBEAT ---
 def send_heartbeat():
-    # quick status ping so I know the app is alive
     with batch_lock:
         detection_count = len(batch_detections)
 
@@ -455,7 +490,6 @@ def send_heartbeat():
 
 # --- HEARTBEAT SCHEDULER THREAD ---
 def heartbeat_scheduler():
-    # sends a status ping at each hour in HEARTBEAT_HOURS, once per day each
     sent_hours = set()
     log.info(f"[HEARTBEAT SCHEDULER] Started. Will ping at hours: {HEARTBEAT_HOURS}")
 
@@ -474,8 +508,6 @@ def heartbeat_scheduler():
 
 # --- HELPERS ---
 def reload_keywords():
-    # re-reads keywords.json from disk, called every 60s in the main loop
-    # so a git pull on the server picks up changes without a restart
     global keywords
     try:
         keywords_path = os.path.join(os.path.dirname(__file__), "keywords.json")
@@ -485,11 +517,14 @@ def reload_keywords():
         log.warning(f"Failed to reload keywords.json: {e} — keeping previous values.")
 
 def is_contest_active():
-    # weekdays 6am-8pm, weekends 1pm-6pm
-    now  = datetime.now()
-    day  = now.weekday()
-    hour = now.hour
-    return (6 <= hour < 20) if day < 5 else (13 <= hour < 18)
+    now     = datetime.now()
+    day     = now.weekday()
+    hour    = now.hour
+    if day < 5:
+        return WEEKDAY_START <= hour < WEEKDAY_END
+    elif RUN_WEEKENDS:
+        return WEEKEND_START <= hour < WEEKEND_END
+    return False
 
 # --- EMAIL ---
 def send_email_blast(found_text):
@@ -518,15 +553,11 @@ def send_email_blast(found_text):
 
 # --- HALLUCINATION FILTER ---
 def is_hallucination(text):
-    # whisper likes to make stuff up when there's no real speech
-    # catch the obvious cases before wasting time on keyword checks
     words = text.lower().split()
 
-    # too short to be real
     if len(words) < 3:
         return True
 
-    # repeated trigrams = whisper looping on itself
     if len(words) >= 9:
         trigrams = [" ".join(words[i:i+3]) for i in range(len(words) - 2)]
         for trigram in trigrams:
@@ -540,14 +571,19 @@ def is_hallucination(text):
 def keyword_spotted(text_chunk):
     text_lower = text_chunk.lower()
 
-    # strict phrases fire immediately — high confidence, exclusions don't apply
+    # exclusions always win — checked first even before strict phrases
+    for bad_word in keywords.get("exclude_keywords", []):
+        if bad_word.lower() in text_lower:
+            log.info(f"[EXCLUDED] Matched '{bad_word}' — skipping.")
+            return False
+
+    # strict phrases
     for phrase in keywords.get("strict_keywords", []):
         if phrase.lower() in text_lower:
             log.info(f"[STRICT MATCH] '{phrase}'")
             return True
 
-    # spelling detector — also high confidence, checked before exclusions
-    # catches "w-i-l-d", "G L O W", "s e a s o n" etc.
+    # spelling detector
     spelling_regex   = r"\b([a-z](?:[- ][a-z]){3,})\b"
     has_spelled_word = bool(re.search(spelling_regex, text_lower))
 
@@ -558,29 +594,19 @@ def keyword_spotted(text_chunk):
     has_prize_context   = any(word in text_lower for word in PRIZE_WORDS)
     has_keyword_mention = "keyword" in text_lower
 
-    # dj spelling something out + any contest context = probably the keyword
     if has_spelled_word and (has_shortcode or has_keyword_mention or has_prize_context):
         log.info(f"[SPELLING MATCH] Spelled word with contest context.")
         return True
 
-    # apply exclusions for softer matches only
-    for bad_word in keywords.get("exclude_keywords", []):
-        if bad_word.lower() in text_lower:
-            log.info(f"[EXCLUDED] Matched '{bad_word}' — skipping.")
-            return False
-
     if is_hallucination(text_chunk):
         return False
 
-    # shortcode by itself isn't enough, need at least one other signal
     if has_shortcode:
         if has_prize_context or has_keyword_mention:
             log.info(f"[SHORTCODE MATCH] Shortcode with contest context.")
             return True
         return False
 
-    # prize match fallback — tightened to require shortcode OR spelling
-    # plain mentions of "$80,000" and "keyword" in a promo jingle won't fire this
     if is_contest_active() and has_prize_context and has_keyword_mention:
         if has_shortcode or has_spelled_word:
             log.info(f"[PRIZE MATCH] Prize context during contest hours.")
@@ -590,7 +616,6 @@ def keyword_spotted(text_chunk):
 
 # --- WAV VALIDATION ---
 def is_valid_wav(filepath, min_bytes=8192, timeout=2.0):
-    # runs in a thread so it doesn't block if ffmpeg is still writing the file
     if not os.path.exists(filepath):
         return False
     if os.path.getsize(filepath) < min_bytes:
@@ -616,10 +641,7 @@ def kill_ffmpeg(proc):
         return
     try:
         if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-            )
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
         else:
             proc.kill()
         proc.wait(timeout=5)
@@ -627,7 +649,6 @@ def kill_ffmpeg(proc):
         pass
 
 def drain_stderr(proc, label="ffmpeg"):
-    # drain stderr in background so the pipe buffer never fills and blocks ffmpeg
     def _drain():
         try:
             for line in proc.stderr:
@@ -644,7 +665,6 @@ def drain_stderr(proc, label="ffmpeg"):
 def start_ffmpeg():
     log.info("Connecting to stream...")
 
-    # clear out any leftover chunks from last run
     for f in glob.glob(os.path.join(SEGMENT_DIR, "*.wav")):
         try:
             os.remove(f)
@@ -684,7 +704,6 @@ def listen_and_spot():
     log.info(f"{STATION_NAME} active (Whisper {MODEL_SIZE})")
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 
-    # start background threads
     threading.Thread(target=batch_scheduler, daemon=True, name="batch-scheduler").start()
     threading.Thread(target=heartbeat_scheduler, daemon=True, name="heartbeat-scheduler").start()
 
@@ -697,13 +716,10 @@ def listen_and_spot():
 
     try:
         while True:
-            # hot reload keywords so git pull takes effect without restart
             if time.time() - last_keyword_reload > KEYWORD_RELOAD_INTERVAL:
                 reload_keywords()
                 last_keyword_reload = time.time()
 
-            # restart ffmpeg if it crashed or the stream went silent
-            # grace period suppresses false stall detections right after a (re)start
             process_died   = ffmpeg_proc.poll() is not None
             in_grace       = (time.time() - started_at) < STARTUP_GRACE_SECONDS
             stream_stalled = (
@@ -714,35 +730,29 @@ def listen_and_spot():
             if process_died or stream_stalled:
                 reason = "crash" if process_died else "stall"
                 consecutive_restarts += 1
-                log.warning(
-                    f"FFmpeg {reason} detected (restart #{consecutive_restarts}) — restarting..."
-                )
+                log.warning(f"FFmpeg {reason} detected (restart #{consecutive_restarts}) — restarting...")
                 kill_ffmpeg(ffmpeg_proc)
                 ffmpeg_proc       = start_ffmpeg()
                 last_segment_time = time.time()
                 started_at        = time.time()
 
-                # send crash alert if it keeps happening
                 if consecutive_restarts >= CRASH_ALERT_THRESHOLD:
                     send_crash_alert(reason, consecutive_restarts)
-                    consecutive_restarts = 0  # reset after alerting so we don't spam
+                    consecutive_restarts = 0
 
                 time.sleep(3)
                 continue
 
-            # reset restart counter on any successful segment processing
             consecutive_restarts = 0
 
             files = sorted(glob.glob(os.path.join(SEGMENT_DIR, "*.wav")))
 
-            # need at least 2 files so we're never touching the one ffmpeg is writing
             if len(files) <= 1:
                 time.sleep(1)
                 continue
 
             last_segment_time = time.time()
 
-            # if we're falling behind just drop the old chunks and catch up
             if len(files) > MAX_QUEUED_CHUNKS:
                 log.warning(f"Backlog of {len(files)} chunks — purging oldest to catch up.")
                 for stale in files[: len(files) - MAX_QUEUED_CHUNKS]:
@@ -778,8 +788,6 @@ def listen_and_spot():
                     with open(LOG_FILE, "a", encoding="utf-8") as lf:
                         lf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {full_text}\n")
 
-                    # prepend tail of previous chunk so keywords split across
-                    # chunk boundaries don't get missed
                     combined_text = (previous_tail + " " + full_text).strip()
 
                     if keyword_spotted(combined_text):
@@ -787,7 +795,6 @@ def listen_and_spot():
                             send_email_blast(combined_text)
                         add_to_batch(combined_text)
 
-                    # save last N words for next chunk
                     words = full_text.split()
                     previous_tail = (
                         " ".join(words[-OVERLAP_WORD_COUNT:])
