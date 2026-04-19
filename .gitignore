@@ -1,13 +1,25 @@
+# credentials and per-station config — managed locally or via dashboard
 config.json
+config copy.json
+
+# per-station data files — managed locally or via dashboard
+keywords.json
+batch_detections.json
+keyword_schedule.json
+
+# logs and transcripts
 radio_transcript.txt
-chunk.wav
+radio_listener.log
+archive/
+
+# audio segments
+*.wav
+
+# python
 venv/
 __pycache__/
-*.wav
+
+# test scripts
 test_email.py
-radio_listener.log
-batch_detections.json
-test_gemin.py
-archive/
-config copy.json
 test_openai.py
+test_gemin.py
