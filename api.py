@@ -66,6 +66,13 @@ SAFE_CONFIG_KEYS = [
     "weekend_end",
     "run_weekends",
     "midday_hour",
+    # whisper / vad settings
+    "model_size",
+    "vad_threshold",
+    "vad_min_speech_ms",
+    "vad_min_silence_ms",
+    "whisper_beam_size",
+    "whisper_temperature",
 ]
 
 
@@ -258,3 +265,58 @@ def run_keyword_test(text: str, keywords: dict):
 @app.post("/test")
 def test_detection(body: TestBody):
     return run_keyword_test(body.text, body.keywords)
+
+
+# --- archive ---
+
+@app.get("/archive/list")
+def list_archive():
+    """returns a list of archived dates that have files"""
+    archive_dir = os.path.join(BASE, "archive")
+    if not os.path.exists(archive_dir):
+        return []
+
+    dates = set()
+    for fname in os.listdir(archive_dir):
+        # extract date from filenames like radio_transcript_2026-04-16.txt
+        parts = fname.rsplit("_", 1)
+        if len(parts) == 2:
+            date_part = parts[1].split(".")[0]
+            if len(date_part) == 10 and date_part[4] == "-":
+                dates.add(date_part)
+
+    return sorted(dates, reverse=True)
+
+
+@app.get("/archive/{date}/transcript")
+def get_archive_transcript(date: str):
+    path = os.path.join(BASE, "archive", f"radio_transcript_{date}.txt")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"transcript": read_tail(path, lines=99999), "date": date}
+
+
+@app.get("/archive/{date}/log")
+def get_archive_log(date: str):
+    path = os.path.join(BASE, "archive", f"radio_listener_{date}.log")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"log": read_tail(path, lines=99999), "date": date}
+
+
+@app.get("/archive/{date}/detections")
+def get_archive_detections(date: str):
+    path = os.path.join(BASE, "archive", f"batch_detections_{date}.json")
+    if not os.path.exists(path):
+        # fall back to main batch file filtered by date
+        data = read_json(os.path.join(BASE, "batch_detections.json")) or []
+        return [d for d in data if d.get("timestamp", "").startswith(date)]
+    return read_json(path) or []
+
+
+@app.get("/archive/{date}/schedule")
+def get_archive_schedule(date: str):
+    path = os.path.join(BASE, "archive", f"keyword_schedule_{date}.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Not found")
+    return read_json(path) or {}

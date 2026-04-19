@@ -54,10 +54,17 @@ OPENAI_KEY     = config.get("openai_api_key", "")
 INSTANT_ALERTS = config.get("instant_alerts", True)
 STATION_NAME   = config.get("station_name", "Radio Listener")
 STREAM_URL     = config.get("stream_url", "")
-MODEL_SIZE     = "small"
 
 HEARTBEAT_HOURS       = config.get("heartbeat_hours", [12, 16])
 CRASH_ALERT_THRESHOLD = config.get("crash_alert_threshold", 3)
+
+# --- WHISPER / VAD SETTINGS ---
+MODEL_SIZE          = config.get("model_size", "small")
+VAD_THRESHOLD       = float(config.get("vad_threshold", 0.3))
+VAD_MIN_SPEECH_MS   = int(config.get("vad_min_speech_ms", 500))
+VAD_MIN_SILENCE_MS  = int(config.get("vad_min_silence_ms", 500))
+WHISPER_BEAM_SIZE   = int(config.get("whisper_beam_size", 1))
+WHISPER_TEMPERATURE = float(config.get("whisper_temperature", 0.0))
 
 # --- CONTEST HOURS (from config, with sensible defaults) ---
 WEEKDAY_START  = config.get("weekday_start", 6)
@@ -180,6 +187,14 @@ def save_keyword_schedule(hour_to_keyword, schedule_hours, label):
 def archive_daily_logs():
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     try:
+        # close the file handler before moving files so the logger
+        # doesn't keep writing to the old inode after os.replace
+        root_logger = logging.getLogger()
+        file_handlers = [h for h in root_logger.handlers if isinstance(h, logging.FileHandler)]
+        for h in file_handlers:
+            h.close()
+            root_logger.removeHandler(h)
+
         files = {
             LOG_FILE: os.path.join(ARCHIVE_DIR, f"radio_transcript_{yesterday}.txt"),
             APP_LOG:  os.path.join(ARCHIVE_DIR, f"radio_listener_{yesterday}.log"),
@@ -187,15 +202,36 @@ def archive_daily_logs():
         for src, dest in files.items():
             if os.path.exists(src) and os.path.getsize(src) > 0:
                 os.replace(src, dest)
-                log.info(f"Archived {src} -> {dest}")
+
+        # create fresh empty files
         open(LOG_FILE, "w").close()
         open(APP_LOG, "w").close()
+
+        # re-attach file handler to the new empty app log
+        new_handler = logging.FileHandler(APP_LOG, encoding="utf-8")
+        new_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        root_logger.addHandler(new_handler)
+
+        log.info(f"Archived logs for {yesterday} to archive/")
+
         # archive the schedule too
         schedule_dest = os.path.join(ARCHIVE_DIR, f"keyword_schedule_{yesterday}.json")
         if os.path.exists(SCHEDULE_FILE):
             os.replace(SCHEDULE_FILE, schedule_dest)
+
+        # archive batch detections
+        batch_dest = os.path.join(ARCHIVE_DIR, f"batch_detections_{yesterday}.json")
+        if os.path.exists(BATCH_FILE) and os.path.getsize(BATCH_FILE) > 2:
+            import shutil
+            shutil.copy2(BATCH_FILE, batch_dest)
+
     except Exception as e:
-        log.warning(f"Failed to archive logs: {e}")
+        # use print here in case the logger itself is broken mid-archive
+        print(f"[ARCHIVE ERROR] {e}")
+        try:
+            log.warning(f"Failed to archive logs: {e}")
+        except Exception:
+            pass
 
 # --- KEYWORD EXTRACTION ---
 def extract_keywords_with_openai(detections):
@@ -701,7 +737,7 @@ def start_ffmpeg():
 
 # --- MAIN LOOP ---
 def listen_and_spot():
-    log.info(f"{STATION_NAME} active (Whisper {MODEL_SIZE})")
+    log.info(f"{STATION_NAME} active (Whisper {MODEL_SIZE} | beam={WHISPER_BEAM_SIZE} | vad_threshold={VAD_THRESHOLD} | min_speech={VAD_MIN_SPEECH_MS}ms)")
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 
     threading.Thread(target=batch_scheduler, daemon=True, name="batch-scheduler").start()
@@ -771,15 +807,15 @@ def listen_and_spot():
 
                 segments, _ = model.transcribe(
                     target_file,
-                    beam_size=1,
+                    beam_size=WHISPER_BEAM_SIZE,
                     vad_filter=True,
                     vad_parameters=dict(
-                        threshold=0.3,
-                        min_speech_duration_ms=500,
-                        min_silence_duration_ms=500,
+                        threshold=VAD_THRESHOLD,
+                        min_speech_duration_ms=VAD_MIN_SPEECH_MS,
+                        min_silence_duration_ms=VAD_MIN_SILENCE_MS,
                     ),
                     condition_on_previous_text=False,
-                    temperature=0.0,
+                    temperature=WHISPER_TEMPERATURE,
                 )
                 full_text = " ".join(s.text.strip() for s in segments).strip()
 
