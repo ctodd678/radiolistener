@@ -826,7 +826,7 @@ def listen_and_spot():
 
                     combined_text = (previous_tail + " " + full_text).strip()
 
-                    if keyword_spotted(combined_text):
+                    if keyword_spotted(combined_text, exclusion_text=full_text):
                         if INSTANT_ALERTS:
                             send_email_blast(combined_text)
                         add_to_batch(combined_text)
