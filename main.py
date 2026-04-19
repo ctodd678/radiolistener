@@ -604,16 +604,22 @@ def is_hallucination(text):
     return False
 
 # --- KEYWORD DETECTION ---
-def keyword_spotted(text_chunk):
+def keyword_spotted(text_chunk, exclusion_text=None):
+    """
+    text_chunk     — combined text (overlap tail + current chunk) used for detection breadth
+    exclusion_text — only the current chunk, used for exclusion checks so the
+                     overlap tail from the previous chunk can't suppress a real keyword
+    """
     text_lower = text_chunk.lower()
+    excl_lower = (exclusion_text or text_chunk).lower()
 
-    # exclusions always win — checked first even before strict phrases
+    # exclusions run only against the current chunk, not the overlap tail
     for bad_word in keywords.get("exclude_keywords", []):
-        if bad_word.lower() in text_lower:
+        if bad_word.lower() in excl_lower:
             log.info(f"[EXCLUDED] Matched '{bad_word}' — skipping.")
             return False
 
-    # strict phrases
+    # strict phrases run against the full combined text for boundary detection
     for phrase in keywords.get("strict_keywords", []):
         if phrase.lower() in text_lower:
             log.info(f"[STRICT MATCH] '{phrase}'")
