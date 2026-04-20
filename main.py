@@ -137,11 +137,31 @@ def add_to_batch(text):
         return
 
     global batch_detections
-    entry = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "text": text,
-    }
+
+    # deduplicate: suppress if a detection in the last 90 seconds shares
+    # more than 60% of its words with the current text (overlap chunk duplicates)
+    now_ts = time.time()
+    text_words = set(text.lower().split())
     with batch_lock:
+        for prev in reversed(batch_detections):
+            try:
+                prev_ts = time.mktime(time.strptime(prev["timestamp"], "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                continue
+            if now_ts - prev_ts > 90:
+                break
+            prev_words = set(prev["text"].lower().split())
+            if not text_words or not prev_words:
+                continue
+            overlap = len(text_words & prev_words) / max(len(text_words), len(prev_words))
+            if overlap > 0.6:
+                log.info(f"[BATCH] Duplicate suppressed ({overlap:.0%} overlap with recent detection).")
+                return
+
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "text": text,
+        }
         batch_detections.append(entry)
         save_batch(batch_detections)
     log.info(f"[BATCH] Detection queued ({len(batch_detections)} total today).")

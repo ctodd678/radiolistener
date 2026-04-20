@@ -107,12 +107,12 @@ def get_detections():
 
 
 @app.get("/log")
-def get_log(lines: int = 300):
+def get_log(lines: int = 2000):
     return {"log": read_tail(os.path.join(BASE, "radio_listener.log"), lines=lines)}
 
 
 @app.get("/transcript")
-def get_transcript(lines: int = 150):
+def get_transcript(lines: int = 2000):
     return {"transcript": read_tail(os.path.join(BASE, "radio_transcript.txt"), lines=lines)}
 
 
