@@ -445,7 +445,6 @@ def batch_scheduler():
         minute  = now.minute
 
         if hour == 0 and minute == 0:
-            archive_daily_logs()
             batch_sent_today  = False
             midday_sent_today = False
             log.info("[BATCH SCHEDULER] Daily reset.")
@@ -457,12 +456,14 @@ def batch_scheduler():
                 send_batch_email(clear=False)
                 midday_sent_today = True
 
-        # end of day summary
+        # end of day summary — also triggers archive so it runs even if service
+        # is stopped overnight and never reaches midnight
         if not batch_sent_today:
             end_hour = WEEKDAY_END if weekday < 5 else WEEKEND_END
             if hour == end_hour and minute == 0:
                 log.info(f"[BATCH SCHEDULER] Contest window closed ({end_hour}:00) — sending final summary.")
                 send_batch_email(clear=True)
+                archive_daily_logs()
 
         time.sleep(30)
 
