@@ -23,3 +23,11 @@ __pycache__/
 test_email.py
 test_openai.py
 test_gemin.py
+
+# playwright / virgin auto-submitter
+virgin_submit.js
+virgin_submissions.json
+node_modules/
+package.json
+package-lock.json
+debug_keyword.js

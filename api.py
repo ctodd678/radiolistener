@@ -320,3 +320,67 @@ def get_archive_schedule(date: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Not found")
     return read_json(path) or {}
+
+
+# --- virgin radio auto-submitter ---
+
+class VirginSubmitBody(BaseModel):
+    keyword: str | None = None
+    force: bool = False
+    date: str | None = None   # YYYY-MM-DD; None = today's keyword_schedule.json
+
+
+@app.post("/virgin/submit")
+def virgin_submit(body: VirginSubmitBody = VirginSubmitBody()):
+    node = "/usr/bin/node"
+    script = os.path.join(BASE, "virgin_submit.js")
+    config = os.path.join(BASE, "config.json")
+
+    if not os.path.exists(script):
+        raise HTTPException(status_code=404, detail="virgin_submit.js not found on this container")
+    if not os.path.exists(node):
+        node = "node"
+
+    # resolve which keyword_schedule to use
+    today = datetime.now().strftime("%Y-%m-%d")
+    if body.date and body.date != today:
+        schedule_path = os.path.join(BASE, "archive", f"keyword_schedule_{body.date}.json")
+    else:
+        schedule_path = os.path.join(BASE, "keyword_schedule.json")
+
+    if not os.path.exists(schedule_path):
+        raise HTTPException(status_code=404, detail=f"keyword_schedule not found: {schedule_path}")
+
+    cmd = [node, script, "--config", config, "--schedule", schedule_path]
+    if body.keyword:
+        cmd += ["--keyword", body.keyword]
+    if body.force:
+        cmd += ["--force"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=BASE,
+        )
+        output = result.stdout + result.stderr
+        success = result.returncode == 0 and "SUCCESS" in output
+        return {"ok": success, "output": output, "returncode": result.returncode}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="virgin_submit.js timed out after 120s")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/virgin/status")
+def virgin_status():
+    log_path = os.path.join(BASE, "virgin_submissions.json")
+    today = datetime.now().strftime("%Y-%m-%d")
+    data = read_json(log_path) or {}
+    return {
+        "today": today,
+        "submitted_today": data.get(today, []),
+        "all": data,
+    }
