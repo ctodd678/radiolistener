@@ -379,8 +379,20 @@ def virgin_status():
     log_path = os.path.join(BASE, "virgin_submissions.json")
     today = datetime.now().strftime("%Y-%m-%d")
     data = read_json(log_path) or {}
+    raw = data.get(today, [])
+
+    # parse "email:KEYWORD" entries into per-profile groups
+    by_profile = {}
+    for entry in raw:
+        if ":" in entry:
+            email, kw = entry.split(":", 1)
+            by_profile.setdefault(email, []).append(kw)
+        else:
+            by_profile.setdefault("legacy", []).append(entry)
+
     return {
         "today": today,
-        "submitted_today": data.get(today, []),
+        "submitted_today": raw,
+        "by_profile": by_profile,
         "all": data,
     }
