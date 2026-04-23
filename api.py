@@ -355,7 +355,21 @@ def virgin_submit(body: VirginSubmitBody = VirginSubmitBody()):
             schedule_path = os.path.join(BASE, "keyword_schedule.json")
 
         if not os.path.exists(schedule_path):
-            raise HTTPException(status_code=404, detail=f"No keyword schedule found for {body.date or today}. Submit a specific keyword instead.")
+            # fall back to root keyword_schedule.json
+            fallback = os.path.join(BASE, "keyword_schedule.json")
+            if os.path.exists(fallback):
+                schedule_path = fallback
+            else:
+                # fall back to most recent archived schedule
+                archive_dir = os.path.join(BASE, "archive")
+                candidates = sorted([
+                    f for f in os.listdir(archive_dir)
+                    if f.startswith("keyword_schedule_") and f.endswith(".json")
+                ], reverse=True) if os.path.exists(archive_dir) else []
+                if candidates:
+                    schedule_path = os.path.join(archive_dir, candidates[0])
+                else:
+                    raise HTTPException(status_code=404, detail=f"No keyword schedule found for {body.date or today}. Submit a specific keyword instead.")
 
         cmd += ["--schedule", schedule_path]
     if body.force:
