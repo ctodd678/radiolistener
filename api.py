@@ -341,19 +341,23 @@ def virgin_submit(body: VirginSubmitBody = VirginSubmitBody()):
     if not os.path.exists(node):
         node = "node"
 
-    # resolve which keyword_schedule to use
-    today = datetime.now().strftime("%Y-%m-%d")
-    if body.date and body.date != today:
-        schedule_path = os.path.join(BASE, "archive", f"keyword_schedule_{body.date}.json")
-    else:
-        schedule_path = os.path.join(BASE, "keyword_schedule.json")
+    cmd = [node, script, "--config", config]
 
-    if not os.path.exists(schedule_path):
-        raise HTTPException(status_code=404, detail=f"keyword_schedule not found: {schedule_path}")
-
-    cmd = [node, script, "--config", config, "--schedule", schedule_path]
     if body.keyword:
+        # specific keyword — no schedule needed
         cmd += ["--keyword", body.keyword]
+    else:
+        # resolve which keyword_schedule to use
+        today = datetime.now().strftime("%Y-%m-%d")
+        if body.date and body.date != today:
+            schedule_path = os.path.join(BASE, "archive", f"keyword_schedule_{body.date}.json")
+        else:
+            schedule_path = os.path.join(BASE, "keyword_schedule.json")
+
+        if not os.path.exists(schedule_path):
+            raise HTTPException(status_code=404, detail=f"No keyword schedule found for {body.date or today}. Submit a specific keyword instead.")
+
+        cmd += ["--schedule", schedule_path]
     if body.force:
         cmd += ["--force"]
 
