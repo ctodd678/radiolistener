@@ -205,7 +205,10 @@ def save_keyword_schedule(hour_to_keyword, schedule_hours, label):
 
 # --- LOG ARCHIVING ---
 def archive_daily_logs():
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    # Archive is triggered at WEEKDAY_END (e.g. 8pm) — use today's date,
+    # not yesterday's.  Using timedelta(-1) was a bug: it named April 24's
+    # data as April 23 because the function never ran at midnight.
+    archive_date = datetime.now().strftime("%Y-%m-%d")
     try:
         # close the file handler before moving files so the logger
         # doesn't keep writing to the old inode after os.replace
@@ -216,8 +219,8 @@ def archive_daily_logs():
             root_logger.removeHandler(h)
 
         files = {
-            LOG_FILE: os.path.join(ARCHIVE_DIR, f"radio_transcript_{yesterday}.txt"),
-            APP_LOG:  os.path.join(ARCHIVE_DIR, f"radio_listener_{yesterday}.log"),
+            LOG_FILE: os.path.join(ARCHIVE_DIR, f"radio_transcript_{archive_date}.txt"),
+            APP_LOG:  os.path.join(ARCHIVE_DIR, f"radio_listener_{archive_date}.log"),
         }
         for src, dest in files.items():
             if os.path.exists(src) and os.path.getsize(src) > 0:
@@ -232,15 +235,15 @@ def archive_daily_logs():
         new_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
         root_logger.addHandler(new_handler)
 
-        log.info(f"Archived logs for {yesterday} to archive/")
+        log.info(f"Archived logs for {archive_date} to archive/")
 
         # archive the schedule too
-        schedule_dest = os.path.join(ARCHIVE_DIR, f"keyword_schedule_{yesterday}.json")
+        schedule_dest = os.path.join(ARCHIVE_DIR, f"keyword_schedule_{archive_date}.json")
         if os.path.exists(SCHEDULE_FILE):
             os.replace(SCHEDULE_FILE, schedule_dest)
 
         # archive batch detections
-        batch_dest = os.path.join(ARCHIVE_DIR, f"batch_detections_{yesterday}.json")
+        batch_dest = os.path.join(ARCHIVE_DIR, f"batch_detections_{archive_date}.json")
         if os.path.exists(BATCH_FILE) and os.path.getsize(BATCH_FILE) > 2:
             import shutil
             shutil.copy2(BATCH_FILE, batch_dest)
