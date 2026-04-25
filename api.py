@@ -406,6 +406,20 @@ def virgin_submit(body: VirginSubmitBody = VirginSubmitBody()):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class VirginSubmissionsBody(BaseModel):
+    data: dict
+
+
+@app.post("/virgin/submissions")
+def set_virgin_submissions(body: VirginSubmissionsBody):
+    path = os.path.join(BASE, "virgin_submissions.json")
+    try:
+        write_json(path, body.data)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/virgin/status")
 def virgin_status():
     log_path = os.path.join(BASE, "virgin_submissions.json")
