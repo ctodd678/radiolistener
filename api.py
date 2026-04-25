@@ -118,6 +118,20 @@ def get_transcript(lines: int = 2000):
 
 # --- keyword schedule ---
 
+class ScheduleBody(BaseModel):
+    data: dict
+
+
+@app.post("/schedule")
+def set_schedule(body: ScheduleBody):
+    path = os.path.join(BASE, "keyword_schedule.json")
+    try:
+        write_json(path, body.data)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/schedule")
 def get_schedule():
     data = read_json(os.path.join(BASE, "keyword_schedule.json"))
