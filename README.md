@@ -2,6 +2,10 @@
 
 Listens to a radio station 24/7, transcribes everything in real-time, and emails you when it hears a keyword. Built to run on a cheap N100 mini PC inside a Proxmox LXC container and basically forget about it.
 
+## Dashboard
+
+Check out the front-end for this project here! https://github.com/ctodd678/radiolistener-dashboard
+
 ## Demo
 
 > *Running on an N100 Proxmox node in an LXC container. Draws less than 10 watts around the clock.*
