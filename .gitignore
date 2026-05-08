@@ -31,3 +31,7 @@ node_modules/
 package.json
 package-lock.json
 debug_keyword.js
+
+# CHUM SMS auto-submitter (Mac-side scripts + user config + LaunchAgent)
+chum-sms/
+sms_sent.json

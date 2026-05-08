@@ -442,3 +442,88 @@ def virgin_status():
         "by_profile": by_profile,
         "all": data,
     }
+
+
+# --- CHUM SMS auto-submitter ---
+#
+# The CHUM contest is texted, not Playwright-submitted. The Mac runs a
+# LaunchAgent at end of day that:
+#   1. GET /sms/status  -> learns which keywords still need to be sent today
+#   2. for each pending keyword, sends an SMS via Messages.app
+#   3. POST /sms/mark-sent after each successful send
+#
+# Storage on disk: sms_sent.json
+#   { "YYYY-MM-DD": ["KEYWORD@HH:MM:SS", ...], ... }
+
+
+@app.get("/sms/status")
+def sms_status():
+    """
+    Returns today's keyword schedule (only non-unclear slots), what's already
+    been texted today, and what's still pending. This is the single endpoint
+    the Mac script reads to decide what to send.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    schedule = read_json(os.path.join(BASE, "keyword_schedule.json")) or {}
+    sent_log = read_json(os.path.join(BASE, "sms_sent.json")) or {}
+
+    schedule_keywords = []
+    for slot in schedule.get("slots", []):
+        kw = (slot.get("keyword") or "").strip()
+        if kw and kw.lower() != "unclear":
+            schedule_keywords.append({
+                "hour":    slot.get("hour"),
+                "label":   slot.get("label"),
+                "keyword": kw.upper(),
+            })
+
+    sent_today = sent_log.get(today, [])
+    sent_set = {entry.split("@", 1)[0].strip().upper() for entry in sent_today if entry}
+
+    pending = [k for k in schedule_keywords if k["keyword"] not in sent_set]
+
+    return {
+        "today":             today,
+        "schedule_keywords": schedule_keywords,
+        "pending":           pending,
+        "sent_today":        sent_today,
+        "all":               sent_log,
+    }
+
+
+class SmsMarkSentBody(BaseModel):
+    keyword: str
+
+
+@app.post("/sms/mark-sent")
+def sms_mark_sent(body: SmsMarkSentBody):
+    """Append a keyword to today's sent log, tagged with the time it was sent."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    path = os.path.join(BASE, "sms_sent.json")
+
+    log_data = read_json(path) or {}
+    log_data.setdefault(today, [])
+    entry = f"{body.keyword.strip().upper()}@{timestamp}"
+    log_data[today].append(entry)
+
+    try:
+        write_json(path, log_data)
+        return {"ok": True, "entry": entry}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SmsSubmissionsBody(BaseModel):
+    data: dict
+
+
+@app.post("/sms/submissions")
+def sms_submissions(body: SmsSubmissionsBody):
+    """Replace the entire sms_sent.json (used when the dashboard edits chips)."""
+    path = os.path.join(BASE, "sms_sent.json")
+    try:
+        write_json(path, body.data)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
