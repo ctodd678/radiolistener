@@ -204,11 +204,12 @@ def save_keyword_schedule(hour_to_keyword, schedule_hours, label):
         log.warning(f"[SCHEDULE] Failed to write keyword_schedule.json: {e}")
 
 # --- LOG ARCHIVING ---
-def archive_daily_logs():
-    # Archive is triggered at WEEKDAY_END (e.g. 8pm) — use today's date,
-    # not yesterday's.  Using timedelta(-1) was a bug: it named April 24's
-    # data as April 23 because the function never ran at midnight.
-    archive_date = datetime.now().strftime("%Y-%m-%d")
+def archive_daily_logs(archive_date=None):
+    # archive_date defaults to today, but the caller can pass a previous
+    # date when archiving stale data at startup (the schedule file may
+    # still hold yesterday's date).
+    if archive_date is None:
+        archive_date = datetime.now().strftime("%Y-%m-%d")
     try:
         # close the file handler before moving files so the logger
         # doesn't keep writing to the old inode after os.replace
@@ -255,6 +256,82 @@ def archive_daily_logs():
             log.warning(f"Failed to archive logs: {e}")
         except Exception:
             pass
+
+
+def archive_stale_data_on_startup():
+    """
+    If keyword_schedule.json (or batch_detections.json / log files) is from
+    a previous day, archive everything under that date so today starts fresh.
+
+    Why this exists:
+    Archiving used to fire at WEEKDAY_END (8pm), which meant the dashboard
+    showed an empty schedule between 8pm and midnight on every contest day.
+    Now we leave yesterday's data in place all night, and the next time the
+    service starts (or midnight rolls over while it's running) we archive
+    using yesterday's actual date.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    sched_date = None
+    if os.path.exists(SCHEDULE_FILE):
+        try:
+            with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
+                sched_date = (json.load(f) or {}).get("date")
+        except Exception:
+            sched_date = None
+
+    # fall back to the LOG_FILE mtime if the schedule file is missing/corrupt
+    if not sched_date and os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+        try:
+            sched_date = datetime.fromtimestamp(
+                os.path.getmtime(LOG_FILE)
+            ).strftime("%Y-%m-%d")
+        except Exception:
+            sched_date = None
+
+    if sched_date and sched_date != today:
+        log.info(f"[STARTUP] Found stale data from {sched_date} — archiving before today's run.")
+        archive_daily_logs(archive_date=sched_date)
+    else:
+        log.info(f"[STARTUP] No stale data to archive (current data dated {sched_date or 'n/a'}).")
+
+
+# --- AUTO-SUBMIT (end of day) ---
+def run_virgin_submit_at_eod():
+    """
+    If virgin_submit.js exists in this container's working dir, launch it as a
+    fire-and-forget background process at end of day with today's
+    keyword_schedule.json. Output goes to virgin_submit_eod.log so the
+    dashboard can surface it later.
+    """
+    script = os.path.join(SCRIPT_DIR, "virgin_submit.js")
+    if not os.path.exists(script):
+        return  # not the Virgin container — silent no-op
+
+    node = "/usr/bin/node" if os.path.exists("/usr/bin/node") else "node"
+    config_path   = os.path.join(SCRIPT_DIR, "config.json")
+    schedule_path = SCHEDULE_FILE
+    eod_log       = os.path.join(SCRIPT_DIR, "virgin_submit_eod.log")
+
+    if not os.path.exists(schedule_path):
+        log.warning("[EOD AUTO-SUBMIT] No keyword_schedule.json — skipping auto-submit.")
+        return
+
+    cmd = [node, script, "--config", config_path, "--schedule", schedule_path]
+    try:
+        log.info(f"[EOD AUTO-SUBMIT] Launching virgin_submit.js (output → {os.path.basename(eod_log)})")
+        f = open(eod_log, "ab")
+        f.write(f"\n--- EOD run started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+        f.flush()
+        subprocess.Popen(
+            cmd,
+            cwd=SCRIPT_DIR,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception as e:
+        log.error(f"[EOD AUTO-SUBMIT] Failed to launch virgin_submit.js: {e}")
+
 
 # --- KEYWORD EXTRACTION ---
 def extract_keywords_with_openai(detections):
@@ -468,9 +545,16 @@ def batch_scheduler():
         minute  = now.minute
 
         if hour == 0 and minute == 0:
+            # Midnight rollover: archive yesterday's data now that a new day has
+            # started, then reset the daily flags so today's batch flow can run.
+            # We're past midnight already, so use yesterday's date for the archive.
+            # If the service was stopped overnight this never fires, but the
+            # archive_stale_data_on_startup() helper covers that case at boot.
+            yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            archive_daily_logs(archive_date=yesterday)
             batch_sent_today  = False
             midday_sent_today = False
-            log.info("[BATCH SCHEDULER] Daily reset.")
+            log.info(f"[BATCH SCHEDULER] Daily reset (archived {yesterday}).")
 
         # midday summary — weekdays only, at MIDDAY_HOUR
         if weekday < 5 and not midday_sent_today:
@@ -479,14 +563,18 @@ def batch_scheduler():
                 send_batch_email(clear=False)
                 midday_sent_today = True
 
-        # end of day summary — also triggers archive so it runs even if service
-        # is stopped overnight and never reaches midnight
+        # end of day summary — sends the email and (if Virgin container)
+        # auto-submits keywords. Archiving is deferred until midnight so the
+        # dashboard keeps showing today's schedule through the evening.
         if not batch_sent_today:
             end_hour = WEEKDAY_END if weekday < 5 else WEEKEND_END
             if hour == end_hour and minute == 0:
                 log.info(f"[BATCH SCHEDULER] Contest window closed ({end_hour}:00) — sending final summary.")
                 send_batch_email(clear=True)
-                archive_daily_logs()
+                # Give send_batch_email a moment to finish writing the schedule
+                # file, then kick off the Virgin auto-submit (no-op on other CTs).
+                time.sleep(2)
+                run_virgin_submit_at_eod()
 
         time.sleep(30)
 
@@ -768,6 +856,10 @@ def start_ffmpeg():
 # --- MAIN LOOP ---
 def listen_and_spot():
     log.info(f"{STATION_NAME} active (Whisper {MODEL_SIZE} | beam={WHISPER_BEAM_SIZE} | vad_threshold={VAD_THRESHOLD} | min_speech={VAD_MIN_SPEECH_MS}ms)")
+
+    # Roll over any leftover data from a previous day before today's run begins.
+    archive_stale_data_on_startup()
+
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 
     threading.Thread(target=batch_scheduler, daemon=True, name="batch-scheduler").start()
